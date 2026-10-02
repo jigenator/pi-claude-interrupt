@@ -70,7 +70,7 @@ export function createClaudeInterrupt(pi: ExtensionAPI): void {
 			const live = animation && entry.data?.id === animation.id ? animation : undefined;
 			const indicator = live ? ["›··", "·›·", "··›"][live.frame % 3] : " ✓ ";
 			const pad = pi.getSettings().outputPad === 0 ? "" : " ";
-			return [truncateToWidth(theme.fg("accent", `${pad}Conversation Steered  ${indicator}`), width)];
+			return [truncateToWidth(theme.fg("accent", `${pad}Conversation Steered ${indicator}`), width)];
 		},
 		invalidate() {},
 	}));

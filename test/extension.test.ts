@@ -375,7 +375,7 @@ test("history marker sweeps every 150ms for all 20 steps then persists without c
 	assert.equal(h.markers.length, 1);
 	for (let step = 0; step < 20; step++) {
 		const indicator = ["›··", "·›·", "··›"][step % 3];
-		assert.deepEqual(h.renderMarker()?.map(stripAnsi), [` Conversation Steered  ${indicator}`]);
+		assert.deepEqual(h.renderMarker()?.map(stripAnsi), [` Conversation Steered ${indicator}`]);
 		assert.deepEqual(h.renderWidget(), []); // No second visible copy.
 		for (const width of [0, 1, 3, 12, 25]) {
 			const lines = h.renderMarker(0, width)!;
@@ -383,11 +383,11 @@ test("history marker sweeps every 150ms for all 20 steps then persists without c
 			assert.ok(visibleWidth(lines[0]) <= width);
 		}
 		t.mock.timers.tick(149);
-		assert.deepEqual(h.renderMarker()?.map(stripAnsi), [` Conversation Steered  ${indicator}`]);
+		assert.deepEqual(h.renderMarker()?.map(stripAnsi), [` Conversation Steered ${indicator}`]);
 		t.mock.timers.tick(1);
 		assert.equal(h.renderRequests, step + 1);
 	}
-	assert.deepEqual(h.renderMarker()?.map(stripAnsi), [" Conversation Steered   ✓ "]);
+	assert.deepEqual(h.renderMarker()?.map(stripAnsi), [" Conversation Steered  ✓ "]);
 	assert.equal(h.renderWidget(), undefined);
 	assert.equal(h.widgetShows, 1);
 	h.setColor("\x1b[35m");
@@ -399,7 +399,7 @@ test("history marker sweeps every 150ms for all 20 steps then persists without c
 	t.mock.timers.runAll();
 	assert.equal(h.renderRequests, 20);
 	assert.equal(h.markers.length, 1);
-	assert.deepEqual(h.renderMarker()?.map(stripAnsi), [" Conversation Steered   ✓ "]);
+	assert.deepEqual(h.renderMarker()?.map(stripAnsi), [" Conversation Steered  ✓ "]);
 	assert.equal(h.draft, "keep my cursor text");
 });
 
@@ -438,24 +438,24 @@ test("saved markers reload completed and distinct identities never animate old e
 	const saved = structuredClone(first.markers[0].entry);
 	const h = harness(t);
 	h.loadEntry(saved);
-	assert.deepEqual(h.renderMarker()?.map(stripAnsi), [" Conversation Steered   ✓ "]);
+	assert.deepEqual(h.renderMarker()?.map(stripAnsi), [" Conversation Steered  ✓ "]);
 	assert.equal(h.widgetShows, 0);
 	startContinuation(h);
 	assert.notDeepEqual(h.markers[0].entry.data, h.markers[1].entry.data);
-	assert.deepEqual(h.renderMarker(0)?.map(stripAnsi), [" Conversation Steered   ✓ "]);
+	assert.deepEqual(h.renderMarker(0)?.map(stripAnsi), [" Conversation Steered  ✓ "]);
 	t.mock.timers.tick(150);
-	assert.deepEqual(h.renderMarker(1)?.map(stripAnsi), [" Conversation Steered  ·›·"]);
+	assert.deepEqual(h.renderMarker(1)?.map(stripAnsi), [" Conversation Steered ·›·"]);
 	startContinuation(h);
 	assert.equal(new Set(h.markers.map(({ entry }) => (entry.data as { id: string }).id)).size, 3);
-	assert.deepEqual(h.renderMarker(0)?.map(stripAnsi), [" Conversation Steered   ✓ "]);
-	assert.deepEqual(h.renderMarker(1)?.map(stripAnsi), [" Conversation Steered   ✓ "]);
-	assert.deepEqual(h.renderMarker(2)?.map(stripAnsi), [" Conversation Steered  ›··"]);
+	assert.deepEqual(h.renderMarker(0)?.map(stripAnsi), [" Conversation Steered  ✓ "]);
+	assert.deepEqual(h.renderMarker(1)?.map(stripAnsi), [" Conversation Steered  ✓ "]);
+	assert.deepEqual(h.renderMarker(2)?.map(stripAnsi), [" Conversation Steered ›··"]);
 	t.mock.timers.tick(150);
 	assert.equal(h.renderRequests, 3); // Old frame, its finalization, new frame only.
 	for (let step = 1; step < 20; step++) t.mock.timers.tick(150);
 	t.mock.timers.runAll();
 	assert.equal(h.renderRequests, 22);
-	assert.deepEqual(h.renderMarker(2)?.map(stripAnsi), [" Conversation Steered   ✓ "]);
+	assert.deepEqual(h.renderMarker(2)?.map(stripAnsi), [" Conversation Steered  ✓ "]);
 });
 
 test("Escape, widget disposal and session cleanup finalize history and cancel every timer", (t) => {
@@ -474,7 +474,7 @@ test("Escape, widget disposal and session cleanup finalize history and cancel ev
 		const renders: number = h.renderRequests;
 		t.mock.timers.runAll();
 		assert.equal(h.renderWidget(), undefined);
-		assert.deepEqual(h.renderMarker()?.map(stripAnsi), [" Conversation Steered   ✓ "]);
+		assert.deepEqual(h.renderMarker()?.map(stripAnsi), [" Conversation Steered  ✓ "]);
 		assert.equal(h.renderRequests, renders);
 	}
 });
@@ -573,7 +573,7 @@ test("marker label aligns with native outputPad 0/1/default and keeps a stable s
 	for (const pad of [0, 1, undefined] as const) {
 		h.setOutputPad(pad);
 		const prefix = pad === 0 ? "" : " ";
-		assert.deepEqual(h.renderMarker()?.map(stripAnsi), [`${prefix}Conversation Steered  ›··`]);
+		assert.deepEqual(h.renderMarker()?.map(stripAnsi), [`${prefix}Conversation Steered ›··`]);
 		const liveWidth = visibleWidth(h.renderMarker()![0]);
 		for (const width of [0, 1, 2, 19, 20, 21, 24, 25]) {
 			assert.equal(h.renderMarker(0, width)!.length, 1);
@@ -582,7 +582,7 @@ test("marker label aligns with native outputPad 0/1/default and keeps a stable s
 		h.setColor("\x1b[35m");
 		assert.ok(h.renderMarker()![0].startsWith("\x1b[35m"));
 		for (let frame = 0; frame < 20; frame++) t.mock.timers.tick(150);
-		assert.deepEqual(h.renderMarker()?.map(stripAnsi), [`${prefix}Conversation Steered   ✓ `]);
+		assert.deepEqual(h.renderMarker()?.map(stripAnsi), [`${prefix}Conversation Steered  ✓ `]);
 		assert.equal(visibleWidth(h.renderMarker()![0]), liveWidth);
 		startContinuation(h);
 	}
