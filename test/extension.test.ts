@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
+import { stripVTControlCharacters as stripAnsi } from "node:util";
+import { visibleWidth, type Component, type TUI } from "@earendil-works/pi-tui";
 
 import type {
 	ExtensionAPI,
 	ExtensionContext,
 	InputEvent,
+	Theme,
 } from "@earendil-works/pi-coding-agent";
 import { createClaudeInterrupt } from "../src/index.ts";
 
@@ -15,7 +18,7 @@ type SentMessage = {
 	options: { deliverAs?: "steer" | "followUp"; expandPromptTemplates?: boolean } | undefined;
 };
 
-function harness() {
+function harness(t: TestContext, mode: ExtensionContext["mode"] = "tui") {
 	const handlers = new Map<string, Handler[]>();
 	const sent: SentMessage[] = [];
 	let terminalHandler: ((data: string) => { consume?: boolean } | undefined) | undefined;
@@ -24,6 +27,12 @@ function harness() {
 	let coreHasPending = false;
 	let aborts = 0;
 	const notifications: string[] = [];
+	let widget: (Component & { dispose?(): void }) | undefined;
+	let renderRequests = 0;
+	let widgetShows = 0;
+	let color = "\x1b[36m";
+	const tui = { requestRender: () => { renderRequests++; } } as unknown as TUI;
+	const theme = { fg: (_key: string, text: string) => `${color}${text}\x1b[0m` } as Theme;
 
 	const emitSync = (name: string, event: any, ctx: ExtensionContext): unknown => {
 		let result: unknown;
@@ -54,7 +63,7 @@ function harness() {
 	} as unknown as ExtensionAPI;
 
 	const ctx = {
-		mode: "tui",
+		mode,
 		ui: {
 			onTerminalInput(handler: typeof terminalHandler) {
 				terminalHandler = handler;
@@ -71,6 +80,17 @@ function harness() {
 			notify: (message: string) => {
 				notifications.push(message);
 			},
+			setWidget(key: string, factory: ((tui: TUI, theme: Theme) => typeof widget) | undefined) {
+				assert.equal(key, "claude-interrupt-steering");
+				// Like Pi, dispose before removing the old component. This catches
+				// recursive setWidget calls from a component's disposal callback.
+				widget?.dispose?.();
+				widget = undefined;
+				if (factory) {
+					widget = factory(tui, theme);
+					widgetShows++;
+				}
+			},
 		},
 		hasPendingMessages: () => coreHasPending,
 		abort: () => {
@@ -85,10 +105,19 @@ function harness() {
 
 	createClaudeInterrupt(pi);
 	emitSync("session_start", { type: "session_start" }, ctx);
+	t.after(() => emitSync("session_shutdown", { type: "session_shutdown" }, ctx));
 
 	return {
 		ctx,
 		sent,
+		renderWidget: (width = 80) => widget?.render(width),
+		disposeWidget() {
+			widget?.dispose?.();
+			widget = undefined;
+		},
+		setColor(value: string) { color = value; widget?.invalidate(); },
+		get renderRequests() { return renderRequests; },
+		get widgetShows() { return widgetShows; },
 		emit(name: string, event: any) {
 			emitSync(name, event, ctx);
 		},
@@ -134,8 +163,8 @@ const userMessageStart = {
 	message: { role: "user", content: [{ type: "text", text: "queued" }], timestamp: 1 },
 };
 
-test("Escape interrupts one queued text and continues only after settlement", () => {
-	const h = harness();
+test("Escape interrupts one queued text and continues only after settlement", (t) => {
+	const h = harness(t);
 	h.input("new direction", "steer");
 	h.setCorePending(true);
 	h.setDraft("unsent draft");
@@ -154,8 +183,8 @@ test("Escape interrupts one queued text and continues only after settlement", ()
 	assert.equal(h.draft, "unsent draft");
 });
 
-test("several messages retain Pi's steering-before-follow-up order without duplication", () => {
-	const h = harness();
+test("several messages retain Pi's steering-before-follow-up order without duplication", (t) => {
+	const h = harness(t);
 	h.input("follow one", "followUp");
 	h.input("steer one", "steer");
 	h.input("follow two", "followUp");
@@ -175,8 +204,8 @@ test("several messages retain Pi's steering-before-follow-up order without dupli
 	assert.equal(new Set(h.sent.map((entry) => entry.text)).size, 4);
 });
 
-test("Escape without a core queue remains native and an unsent draft is not a queue", () => {
-	const h = harness();
+test("Escape without a core queue remains native and an unsent draft is not a queue", (t) => {
+	const h = harness(t);
 	h.setDraft("draft only");
 	h.setCorePending(false);
 
@@ -185,8 +214,8 @@ test("Escape without a core queue remains native and an unsent draft is not a qu
 	assert.equal(h.draft, "draft only");
 });
 
-test("repeated Escape while abort is settling is consumed without aborting twice", () => {
-	const h = harness();
+test("repeated Escape while abort is settling is consumed without aborting twice", (t) => {
+	const h = harness(t);
 	h.input("queued", "steer");
 	h.setCorePending(true);
 
@@ -199,8 +228,8 @@ test("repeated Escape while abort is settling is consumed without aborting twice
 	assert.equal(h.sent.length, 1);
 });
 
-test("Escape can interrupt a replay and resumes the undelivered remainder once", () => {
-	const h = harness();
+test("Escape can interrupt a replay and resumes the undelivered remainder once", (t) => {
+	const h = harness(t);
 	h.input("first", "steer");
 	h.input("second", "steer");
 	h.input("third", "followUp");
@@ -222,8 +251,8 @@ test("Escape can interrupt a replay and resumes the undelivered remainder once",
 	assert.equal(h.sent.filter((entry) => entry.text === "first").length, 1);
 });
 
-test("Escape during continuation preflight restores captured text and exits starting state", () => {
-	const h = harness();
+test("Escape during continuation preflight restores captured text and exits starting state", (t) => {
+	const h = harness(t);
 	h.input("retry me", "steer");
 	h.input("and me", "followUp");
 	h.setCorePending(true);
@@ -239,8 +268,8 @@ test("Escape during continuation preflight restores captured text and exits star
 	assert.equal(h.escape(), undefined);
 });
 
-test("already delivered messages are removed from the observed queue", () => {
-	const h = harness();
+test("already delivered messages are removed from the observed queue", (t) => {
+	const h = harness(t);
 	h.input("queued", "steer");
 	h.emit("message_start", userMessageStart);
 	h.setCorePending(true); // Deliberately inconsistent to exercise the observer guard.
@@ -249,8 +278,8 @@ test("already delivered messages are removed from the observed queue", () => {
 	assert.equal(h.aborts, 0);
 });
 
-test("queued image attachments fall back to Pi's native Escape", () => {
-	const h = harness();
+test("queued image attachments fall back to Pi's native Escape", (t) => {
+	const h = harness(t);
 	h.input("look at this", "steer", true);
 	h.setCorePending(true);
 
@@ -259,8 +288,8 @@ test("queued image attachments fall back to Pi's native Escape", () => {
 	assert.deepEqual(h.sent, []);
 });
 
-test("text submitted during abort settlement is cleared once and replayed once", () => {
-	const h = harness();
+test("text submitted during abort settlement is cleared once and replayed once", (t) => {
+	const h = harness(t);
 	h.input("first", "steer");
 	h.setCorePending(true);
 	h.setDraft("keep me");
@@ -276,8 +305,8 @@ test("text submitted during abort settlement is cleared once and replayed once",
 	assert.deepEqual(h.sent.map((entry) => entry.text), ["first", "raced follow-up"]);
 });
 
-test("a late image is rejected without discarding the captured text batch", () => {
-	const h = harness();
+test("a late image is rejected without discarding the captured text batch", (t) => {
+	const h = harness(t);
 	h.input("first", "steer");
 	h.setCorePending(true);
 	h.setDraft("keep me");
@@ -292,8 +321,8 @@ test("a late image is rejected without discarding the captured text batch", () =
 	assert.deepEqual(h.sent.map((entry) => entry.text), ["first"]);
 });
 
-test("session shutdown removes the terminal listener and clears state", () => {
-	const h = harness();
+test("session shutdown removes the terminal listener and clears state", (t) => {
+	const h = harness(t);
 	h.input("queued", "steer");
 	h.setCorePending(true);
 
@@ -301,4 +330,91 @@ test("session shutdown removes the terminal listener and clears state", () => {
 	assert.equal(h.terminalUnsubscribed, true);
 	assert.equal(h.escape(), undefined);
 	assert.equal(h.aborts, 0);
+});
+
+function startContinuation(h: ReturnType<typeof harness>) {
+	h.input("new direction", "steer");
+	h.setCorePending(true);
+	h.escape();
+	h.emit("agent_settled", { type: "agent_settled" });
+	h.emit("agent_start", { type: "agent_start" });
+}
+
+test("steering widget sweeps, holds a checkmark, clips and clears without changing the draft", (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const h = harness(t);
+	h.setDraft("keep my cursor text");
+	startContinuation(h);
+
+	for (const indicator of ["›··", "·›·", "··›", "›··", "·›·", "··›", " ✓ "]) {
+		assert.deepEqual(h.renderWidget()?.map(stripAnsi), [`${indicator}  Conversation Steered`]);
+		for (const width of [0, 1, 3, 12, 25]) {
+			const lines = h.renderWidget(width)!;
+			assert.equal(lines.length, 1);
+			assert.ok(visibleWidth(lines[0]) <= width);
+		}
+		if (indicator !== " ✓ ") t.mock.timers.tick(150);
+	}
+	assert.equal(h.renderRequests, 6);
+	assert.equal(h.widgetShows, 1);
+	h.setColor("\x1b[35m");
+	assert.ok(h.renderWidget()![0].startsWith("\x1b[35m"));
+	t.mock.timers.tick(999);
+	assert.ok(h.renderWidget());
+	t.mock.timers.tick(1);
+	assert.equal(h.renderWidget(), undefined);
+	t.mock.timers.runAll();
+	assert.equal(h.renderRequests, 6);
+	assert.equal(h.draft, "keep my cursor text");
+});
+
+test("widget waits for a confirmed continuation and stays out of native and non-TUI paths", (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const h = harness(t);
+	h.emit("agent_start", { type: "agent_start" });
+	h.escape();
+	h.input("image", "steer", true);
+	h.setCorePending(true);
+	h.escape();
+	assert.equal(h.widgetShows, 0);
+	h.emit("session_start", { type: "session_start" });
+	h.input("retry me", "steer");
+	h.setCorePending(true);
+	h.escape();
+	h.emit("agent_settled", { type: "agent_settled" });
+	t.mock.timers.runAll(); // Preflight never reaches agent_start.
+	assert.equal(h.widgetShows, 0);
+	h.escape();
+	h.emit("agent_start", { type: "agent_start" });
+	assert.equal(h.widgetShows, 0);
+
+	const rpc = harness(t, "rpc");
+	startContinuation(rpc);
+	assert.equal(rpc.aborts, 0);
+	assert.equal(rpc.widgetShows, 0);
+});
+
+test("widget replacement, disposal and session cleanup cancel every old timer", (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const h = harness(t);
+	startContinuation(h);
+	t.mock.timers.tick(150);
+	startContinuation(h);
+	assert.equal(h.widgetShows, 2);
+	assert.deepEqual(h.renderWidget()?.map(stripAnsi), ["›··  Conversation Steered"]);
+	t.mock.timers.tick(150);
+	assert.equal(h.renderRequests, 2); // One frame from each animation, not an old timer too.
+
+	for (const cleanup of [
+		() => h.disposeWidget(),
+		() => h.emit("session_start", { type: "session_start" }),
+		() => h.emit("session_shutdown", { type: "session_shutdown" }),
+	]) {
+		startContinuation(h);
+		cleanup();
+		const renders: number = h.renderRequests;
+		t.mock.timers.runAll();
+		assert.equal(h.renderWidget(), undefined);
+		assert.equal(h.renderRequests, renders);
+	}
 });

@@ -6,7 +6,9 @@ While Pi is working:
 
 1. Submit one or more messages normally. Pi queues them as steering messages; `Alt+Enter` queues follow-ups.
 2. Press `Esc`.
-3. The active response is aborted, then Pi automatically starts on the queued text. Remaining messages keep Pi's steering-before-follow-up order.
+3. The active response is aborted, then Pi automatically starts on the queued text. Remaining messages keep Pi's steering-before-follow-up order. At that continuation's start, a brief themed “Conversation Steered” arrow sweep appears above the editor.
+
+The animation sweeps every 150 ms, settles into `✓ Conversation Steered`, then clears after one second. It is visual-only: ordinary starts and failed preflight do not show it, and Pi's native “Operation aborted” notice remains unchanged.
 
 An unsent editor draft is left in the editor. If Pi has no submitted queue, this extension does not consume `Esc`, so Pi's normal interrupt behavior remains in effect. If the continuation cannot reach `agent_start` (for example, an authentication preflight fails), press `Esc` again to leave the extension's restart mode and restore every captured text message to the editor.
 

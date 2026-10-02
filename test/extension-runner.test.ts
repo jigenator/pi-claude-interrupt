@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { setImmediate as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
+import type { Component, TUI } from "@earendil-works/pi-tui";
 
 import {
 	discoverAndLoadExtensions,
@@ -13,12 +14,13 @@ import {
 	type ModelRegistry,
 	type SessionManager,
 	type TerminalInputHandler,
+	type Theme,
 } from "@earendil-works/pi-coding-agent";
 
 type Delivery = "steer" | "followUp";
 type Queued = { text: string; deliverAs: Delivery };
 
-async function createRunnerHarness() {
+async function createRunnerHarness(t: TestContext) {
 	const root = dirname(dirname(fileURLToPath(import.meta.url)));
 	const loaded = await discoverAndLoadExtensions(
 		[join(root, "src/index.ts")],
@@ -38,6 +40,7 @@ async function createRunnerHarness() {
 	const delivered: string[] = [];
 	const trace: string[] = [];
 	const jobs = new Set<Promise<void>>();
+	let widget: (Component & { dispose?(): void }) | undefined;
 
 	const runner = new ExtensionRunner(
 		loaded.extensions,
@@ -138,11 +141,20 @@ async function createRunnerHarness() {
 			editorText = text;
 		},
 		notify: () => undefined,
+		setWidget: (_key: string, factory: ((tui: TUI, theme: Theme) => typeof widget) | undefined) => {
+			widget?.dispose?.();
+			widget = undefined;
+			if (factory) widget = factory(
+				{ requestRender: () => undefined } as unknown as TUI,
+				{ fg: (_key: string, text: string) => text } as Theme,
+			);
+		},
 	} as unknown as ExtensionUIContext;
 
 	runner.bindCore(actions, contextActions);
 	runner.setUIContext(ui, "tui");
 	await runner.emit({ type: "session_start", reason: "startup" });
+	t.after(() => runner.emit({ type: "session_shutdown", reason: "quit" }));
 
 	const flush = async (): Promise<void> => {
 		while (jobs.size > 0) await Promise.all([...jobs]);
@@ -150,6 +162,7 @@ async function createRunnerHarness() {
 
 	return {
 		runner,
+		renderWidget: () => widget?.render(80),
 		coreQueue,
 		started,
 		delivered,
@@ -195,8 +208,8 @@ async function createRunnerHarness() {
 	};
 }
 
-test("real ExtensionRunner asynchronously re-interrupts a replayed queue without delivered duplicates", async () => {
-	const h = await createRunnerHarness();
+test("real ExtensionRunner asynchronously re-interrupts a replayed queue without delivered duplicates", async (t) => {
+	const h = await createRunnerHarness(t);
 	await h.queue("first", "steer");
 	await h.queue("second", "steer");
 	await h.queue("third", "followUp");
@@ -204,12 +217,14 @@ test("real ExtensionRunner asynchronously re-interrupts a replayed queue without
 	assert.deepEqual(h.escape(), { consume: true });
 	await h.settle();
 	assert.deepEqual(h.started, ["first"]);
+	assert.deepEqual(h.renderWidget(), ["›··  Conversation Steered"]);
 	assert.deepEqual(h.coreQueue.map((item) => item.text), ["second", "third"]);
 
 	// Interrupt before either replayed queue entry reaches message_start.
 	assert.deepEqual(h.escape(), { consume: true });
 	await h.settle();
 	assert.deepEqual(h.started, ["first", "second"]);
+	assert.deepEqual(h.renderWidget(), ["›··  Conversation Steered"]);
 	assert.deepEqual(h.coreQueue.map((item) => item.text), ["third"], h.trace.join(" | "));
 
 	await h.deliverQueued();
@@ -217,8 +232,8 @@ test("real ExtensionRunner asynchronously re-interrupts a replayed queue without
 	assert.equal(h.aborts, 2);
 });
 
-test("real ExtensionRunner leaves Escape available after asynchronous start failure", async () => {
-	const h = await createRunnerHarness();
+test("real ExtensionRunner leaves Escape available after asynchronous start failure", async (t) => {
+	const h = await createRunnerHarness(t);
 	await h.queue("retry me", "steer");
 	await h.queue("then me", "followUp");
 	h.setEditorText("draft");
@@ -227,6 +242,7 @@ test("real ExtensionRunner leaves Escape available after asynchronous start fail
 	assert.deepEqual(h.escape(), { consume: true });
 	await h.settle();
 	assert.deepEqual(h.started, []);
+	assert.equal(h.renderWidget(), undefined);
 
 	assert.deepEqual(h.escape(), { consume: true });
 	assert.equal(h.editorText, "retry me\n\nthen me\n\ndraft");

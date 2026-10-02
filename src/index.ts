@@ -3,7 +3,7 @@ import type {
 	ExtensionContext,
 	InputEvent,
 } from "@earendil-works/pi-coding-agent";
-import { matchesKey } from "@earendil-works/pi-tui";
+import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 
 type Delivery = "steer" | "followUp";
 
@@ -53,10 +53,26 @@ export function createClaudeInterrupt(pi: ExtensionAPI): void {
 	let expectedReplay: PendingText[] = [];
 	let skipNextUserStart = false;
 	let unsubscribeTerminal: (() => void) | undefined;
+	let animationTimer: ReturnType<typeof setTimeout> | undefined;
+	let widgetContext: ExtensionContext | undefined;
+	const widgetKey = "claude-interrupt-steering";
+
+	const disposeAnimation = (): void => {
+		clearTimeout(animationTimer);
+		animationTimer = undefined;
+		widgetContext = undefined;
+	};
+
+	const clearAnimation = (): void => {
+		const ctx = widgetContext;
+		disposeAnimation();
+		ctx?.ui.setWidget(widgetKey, undefined);
+	};
 
 	const reset = (): void => {
 		unsubscribeTerminal?.();
 		unsubscribeTerminal = undefined;
+		clearAnimation();
 		pending = emptyQueues();
 		interrupt = undefined;
 		expectedReplay = [];
@@ -121,6 +137,7 @@ export function createClaudeInterrupt(pi: ExtensionAPI): void {
 
 		unsubscribeTerminal = ctx.ui.onTerminalInput((data) => {
 			if (!matchesKey(data, "escape")) return;
+			clearAnimation();
 
 			if (interrupt?.phase === "aborting") {
 				// A repeated Escape while the original abort settles is idempotent.
@@ -195,8 +212,31 @@ export function createClaudeInterrupt(pi: ExtensionAPI): void {
 		pi.sendUserMessage(replay[0].text, { expandPromptTemplates: true });
 	});
 
-	pi.on("agent_start", () => {
+	pi.on("agent_start", (_event, ctx) => {
 		if (interrupt?.phase !== "starting") return;
+
+		clearAnimation();
+		if (ctx.mode === "tui") {
+			widgetContext = ctx;
+			ctx.ui.setWidget(widgetKey, (tui, theme) => {
+				let frame = 0;
+				const frames = ["›··", "·›·", "··›", "›··", "·›·", "··›", " ✓ "];
+				const advance = (): void => {
+					frame++;
+					tui.requestRender();
+					animationTimer = setTimeout(frame === 6 ? clearAnimation : advance, frame === 6 ? 1000 : 150);
+				};
+				animationTimer = setTimeout(advance, 150);
+				return {
+					render: (width: number) => [
+						truncateToWidth(theme.fg("accent", `${frames[frame]}  Conversation Steered`), width),
+					],
+					invalidate() {},
+					// Pi calls dispose before removing the widget; do not call setWidget here.
+					dispose: disposeAnimation,
+				};
+			});
+		}
 
 		const state = interrupt;
 		const replay = ordered(state.queues);
