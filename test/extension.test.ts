@@ -33,6 +33,7 @@ function harness(t: TestContext, mode: ExtensionContext["mode"] = "tui") {
 	let renderRequests = 0;
 	let widgetShows = 0;
 	let color = "\x1b[36m";
+	let outputPad: 0 | 1 | undefined;
 	const tui = { requestRender: () => { renderRequests++; } } as unknown as TUI;
 	const theme = { fg: (key: string, text: string) => {
 		assert.equal(key, "accent");
@@ -54,6 +55,7 @@ function harness(t: TestContext, mode: ExtensionContext["mode"] = "tui") {
 	};
 
 	const pi = {
+		getSettings: () => ({ outputPad }),
 		registerEntryRenderer(customType: string, renderer: EntryRenderer) {
 			assert.equal(customType, "claude-interrupt-steering");
 			entryRenderer = renderer;
@@ -139,6 +141,7 @@ function harness(t: TestContext, mode: ExtensionContext["mode"] = "tui") {
 			widget?.dispose?.();
 			widget = undefined;
 		},
+		setOutputPad(value: 0 | 1 | undefined) { outputPad = value; },
 		setColor(value: string) { color = value; widget?.invalidate(); },
 		get renderRequests() { return renderRequests; },
 		get widgetShows() { return widgetShows; },
@@ -158,8 +161,8 @@ function harness(t: TestContext, mode: ExtensionContext["mode"] = "tui") {
 				ctx,
 			);
 		},
-		escape() {
-			return terminalHandler?.("\x1b");
+		escape(data = "\x1b") {
+			return terminalHandler?.(data);
 		},
 		setDraft(text: string) {
 			editorText = text;
@@ -372,7 +375,7 @@ test("history marker sweeps every 150ms for all 20 steps then persists without c
 	assert.equal(h.markers.length, 1);
 	for (let step = 0; step < 20; step++) {
 		const indicator = ["›··", "·›·", "··›"][step % 3];
-		assert.deepEqual(h.renderMarker()?.map(stripAnsi), [`${indicator}  Conversation Steered`]);
+		assert.deepEqual(h.renderMarker()?.map(stripAnsi), [` Conversation Steered  ${indicator}`]);
 		assert.deepEqual(h.renderWidget(), []); // No second visible copy.
 		for (const width of [0, 1, 3, 12, 25]) {
 			const lines = h.renderMarker(0, width)!;
@@ -380,11 +383,11 @@ test("history marker sweeps every 150ms for all 20 steps then persists without c
 			assert.ok(visibleWidth(lines[0]) <= width);
 		}
 		t.mock.timers.tick(149);
-		assert.deepEqual(h.renderMarker()?.map(stripAnsi), [`${indicator}  Conversation Steered`]);
+		assert.deepEqual(h.renderMarker()?.map(stripAnsi), [` Conversation Steered  ${indicator}`]);
 		t.mock.timers.tick(1);
 		assert.equal(h.renderRequests, step + 1);
 	}
-	assert.deepEqual(h.renderMarker()?.map(stripAnsi), [" ✓   Conversation Steered"]);
+	assert.deepEqual(h.renderMarker()?.map(stripAnsi), [" Conversation Steered   ✓ "]);
 	assert.equal(h.renderWidget(), undefined);
 	assert.equal(h.widgetShows, 1);
 	h.setColor("\x1b[35m");
@@ -396,7 +399,7 @@ test("history marker sweeps every 150ms for all 20 steps then persists without c
 	t.mock.timers.runAll();
 	assert.equal(h.renderRequests, 20);
 	assert.equal(h.markers.length, 1);
-	assert.deepEqual(h.renderMarker()?.map(stripAnsi), [" ✓   Conversation Steered"]);
+	assert.deepEqual(h.renderMarker()?.map(stripAnsi), [" Conversation Steered   ✓ "]);
 	assert.equal(h.draft, "keep my cursor text");
 });
 
@@ -435,24 +438,24 @@ test("saved markers reload completed and distinct identities never animate old e
 	const saved = structuredClone(first.markers[0].entry);
 	const h = harness(t);
 	h.loadEntry(saved);
-	assert.deepEqual(h.renderMarker()?.map(stripAnsi), [" ✓   Conversation Steered"]);
+	assert.deepEqual(h.renderMarker()?.map(stripAnsi), [" Conversation Steered   ✓ "]);
 	assert.equal(h.widgetShows, 0);
 	startContinuation(h);
 	assert.notDeepEqual(h.markers[0].entry.data, h.markers[1].entry.data);
-	assert.deepEqual(h.renderMarker(0)?.map(stripAnsi), [" ✓   Conversation Steered"]);
+	assert.deepEqual(h.renderMarker(0)?.map(stripAnsi), [" Conversation Steered   ✓ "]);
 	t.mock.timers.tick(150);
-	assert.deepEqual(h.renderMarker(1)?.map(stripAnsi), ["·›·  Conversation Steered"]);
+	assert.deepEqual(h.renderMarker(1)?.map(stripAnsi), [" Conversation Steered  ·›·"]);
 	startContinuation(h);
 	assert.equal(new Set(h.markers.map(({ entry }) => (entry.data as { id: string }).id)).size, 3);
-	assert.deepEqual(h.renderMarker(0)?.map(stripAnsi), [" ✓   Conversation Steered"]);
-	assert.deepEqual(h.renderMarker(1)?.map(stripAnsi), [" ✓   Conversation Steered"]);
-	assert.deepEqual(h.renderMarker(2)?.map(stripAnsi), ["›··  Conversation Steered"]);
+	assert.deepEqual(h.renderMarker(0)?.map(stripAnsi), [" Conversation Steered   ✓ "]);
+	assert.deepEqual(h.renderMarker(1)?.map(stripAnsi), [" Conversation Steered   ✓ "]);
+	assert.deepEqual(h.renderMarker(2)?.map(stripAnsi), [" Conversation Steered  ›··"]);
 	t.mock.timers.tick(150);
 	assert.equal(h.renderRequests, 3); // Old frame, its finalization, new frame only.
 	for (let step = 1; step < 20; step++) t.mock.timers.tick(150);
 	t.mock.timers.runAll();
 	assert.equal(h.renderRequests, 22);
-	assert.deepEqual(h.renderMarker(2)?.map(stripAnsi), [" ✓   Conversation Steered"]);
+	assert.deepEqual(h.renderMarker(2)?.map(stripAnsi), [" Conversation Steered   ✓ "]);
 });
 
 test("Escape, widget disposal and session cleanup finalize history and cancel every timer", (t) => {
@@ -471,7 +474,116 @@ test("Escape, widget disposal and session cleanup finalize history and cancel ev
 		const renders: number = h.renderRequests;
 		t.mock.timers.runAll();
 		assert.equal(h.renderWidget(), undefined);
-		assert.deepEqual(h.renderMarker()?.map(stripAnsi), [" ✓   Conversation Steered"]);
+		assert.deepEqual(h.renderMarker()?.map(stripAnsi), [" Conversation Steered   ✓ "]);
 		assert.equal(h.renderRequests, renders);
+	}
+});
+
+const escapePress = "\x1b[27;1:1u";
+const escapeRepeat = "\x1b[27;1:2u";
+const escapeRelease = "\x1b[27;1:3u";
+
+test("Escape release and repeat during preflight cannot trigger failed-start recovery", (t) => {
+	const h = harness(t);
+	h.input("retry me", "steer");
+	h.setCorePending(true);
+	h.setDraft("draft");
+	h.escape(escapePress);
+	h.escape(escapeRepeat); // Aborting: same held key, not another action.
+	h.escape(escapeRelease);
+	assert.equal(h.aborts, 1);
+	h.emit("agent_settled", { type: "agent_settled" });
+	h.escape(escapeRelease); // Release can arrive after settlement.
+	assert.equal(h.aborts, 1, "release must not request a second abort in starting phase");
+	assert.equal(h.draft, "draft", "release must not restore the replay as failed preflight");
+	h.emit("agent_start", { type: "agent_start" });
+	assert.equal(h.markers.length, 1, "release must not abandon continuation tracking");
+});
+
+test("Escape release leaves all 20 animation frames live until exactly 3000ms", (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const h = harness(t);
+	h.input("continue", "steer");
+	h.setCorePending(true);
+	h.escape(escapePress);
+	h.emit("agent_settled", { type: "agent_settled" });
+	h.emit("agent_start", { type: "agent_start" });
+	for (let frame = 0; frame < 20; frame++) {
+		h.escape(escapeRelease);
+		assert.deepEqual(h.renderWidget(), [], "release must not finalize the live marker");
+		assert.equal(h.renderRequests, frame, "release must not redraw a completed marker");
+		t.mock.timers.tick(149);
+		assert.deepEqual(h.renderWidget(), []);
+		t.mock.timers.tick(1);
+	}
+	assert.equal(h.renderWidget(), undefined);
+	assert.equal(h.renderRequests, 20);
+	assert.equal(h.markers.length, 1);
+	assert.equal(h.aborts, 1);
+});
+
+test("extension-owned repeats cannot abort preflight or a live no-queue continuation; new presses can", (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const h = harness(t);
+	h.input("continue", "steer");
+	h.setCorePending(true);
+	h.escape(escapePress);
+	h.emit("agent_settled", { type: "agent_settled" });
+	assert.deepEqual(h.escape(escapeRepeat), { consume: true });
+	assert.equal(h.aborts, 1);
+	h.emit("agent_start", { type: "agent_start" });
+	assert.deepEqual(h.escape(escapeRepeat), { consume: true }, "repeat must not fall through to native abort");
+	assert.deepEqual(h.renderWidget(), []);
+	h.escape(escapeRelease);
+	assert.equal(h.escape(escapePress), undefined, "new no-queue press remains native");
+	assert.equal(h.renderWidget(), undefined, "intentional press still ends the animation");
+	assert.equal(h.escape(escapeRepeat), undefined, "native-owned repeats remain native");
+});
+
+test("genuine Kitty Escape presses still recover failed preflight and re-interrupt queued replay", (t) => {
+	const h = harness(t);
+	h.input("first", "steer");
+	h.input("second", "followUp");
+	h.setCorePending(true);
+	h.escape(escapePress);
+	h.emit("agent_settled", { type: "agent_settled" });
+	h.escape(escapeRelease);
+	assert.deepEqual(h.escape(escapePress), { consume: true });
+	assert.equal(h.aborts, 2);
+	assert.equal(h.draft, "first\n\nsecond");
+	h.emit("session_start", { type: "session_start" });
+	h.setDraft("");
+	h.input("first", "steer");
+	h.input("second", "followUp");
+	h.setCorePending(true);
+	h.escape(escapePress);
+	h.emit("agent_settled", { type: "agent_settled" });
+	h.emit("agent_start", { type: "agent_start" });
+	h.escape(escapeRelease);
+	assert.deepEqual(h.escape(escapePress), { consume: true });
+	h.emit("agent_settled", { type: "agent_settled" });
+	h.emit("agent_start", { type: "agent_start" });
+	assert.deepEqual(h.sent.map(({ text }) => text), ["first", "first", "second", "second"]);
+});
+
+test("marker label aligns with native outputPad 0/1/default and keeps a stable single-line width", (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const h = harness(t);
+	startContinuation(h);
+	for (const pad of [0, 1, undefined] as const) {
+		h.setOutputPad(pad);
+		const prefix = pad === 0 ? "" : " ";
+		assert.deepEqual(h.renderMarker()?.map(stripAnsi), [`${prefix}Conversation Steered  ›··`]);
+		const liveWidth = visibleWidth(h.renderMarker()![0]);
+		for (const width of [0, 1, 2, 19, 20, 21, 24, 25]) {
+			assert.equal(h.renderMarker(0, width)!.length, 1);
+			assert.ok(visibleWidth(h.renderMarker(0, width)![0]) <= width);
+		}
+		h.setColor("\x1b[35m");
+		assert.ok(h.renderMarker()![0].startsWith("\x1b[35m"));
+		for (let frame = 0; frame < 20; frame++) t.mock.timers.tick(150);
+		assert.deepEqual(h.renderMarker()?.map(stripAnsi), [`${prefix}Conversation Steered   ✓ `]);
+		assert.equal(visibleWidth(h.renderMarker()![0]), liveWidth);
+		startContinuation(h);
 	}
 });

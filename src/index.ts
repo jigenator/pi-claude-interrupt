@@ -4,7 +4,7 @@ import type {
 	ExtensionContext,
 	InputEvent,
 } from "@earendil-works/pi-coding-agent";
-import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
+import { isKeyRelease, isKeyRepeat, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 
 type Delivery = "steer" | "followUp";
 
@@ -54,6 +54,7 @@ export function createClaudeInterrupt(pi: ExtensionAPI): void {
 	let expectedReplay: PendingText[] = [];
 	let skipNextUserStart = false;
 	let unsubscribeTerminal: (() => void) | undefined;
+	let ownsEscape = false;
 	const markerType = "claude-interrupt-steering";
 	let animation: {
 		id: string;
@@ -68,7 +69,8 @@ export function createClaudeInterrupt(pi: ExtensionAPI): void {
 		render: (width) => {
 			const live = animation && entry.data?.id === animation.id ? animation : undefined;
 			const indicator = live ? ["›··", "·›·", "··›"][live.frame % 3] : " ✓ ";
-			return [truncateToWidth(theme.fg("accent", `${indicator}  Conversation Steered`), width)];
+			const pad = pi.getSettings().outputPad === 0 ? "" : " ";
+			return [truncateToWidth(theme.fg("accent", `${pad}Conversation Steered  ${indicator}`), width)];
 		},
 		invalidate() {},
 	}));
@@ -90,6 +92,7 @@ export function createClaudeInterrupt(pi: ExtensionAPI): void {
 	const reset = (): void => {
 		unsubscribeTerminal?.();
 		unsubscribeTerminal = undefined;
+		ownsEscape = false;
 		clearAnimation();
 		pending = emptyQueues();
 		interrupt = undefined;
@@ -155,10 +158,20 @@ export function createClaudeInterrupt(pi: ExtensionAPI): void {
 
 		unsubscribeTerminal = ctx.ui.onTerminalInput((data) => {
 			if (!matchesKey(data, "escape")) return;
+			// Raw input listeners run before Pi filters Kitty release events. Only
+			// presses act; a held extension-owned Escape must not natively abort the
+			// continuation through repeats after agent_start has cleared interrupt.
+			if (isKeyRelease(data)) {
+				ownsEscape = false;
+				return;
+			}
+			if (isKeyRepeat(data)) return ownsEscape ? { consume: true } : undefined;
+			ownsEscape = false; // A genuine new press chooses ownership again.
 			clearAnimation();
 
 			if (interrupt?.phase === "aborting") {
-				// A repeated Escape while the original abort settles is idempotent.
+				// Another press while the original abort settles is idempotent.
+				ownsEscape = true;
 				return { consume: true };
 			}
 
@@ -172,6 +185,7 @@ export function createClaudeInterrupt(pi: ExtensionAPI): void {
 				expectedReplay = [];
 				pending = emptyQueues();
 				skipNextUserStart = false;
+				ownsEscape = true;
 				ctx.abort();
 				prependEditorText(ctx, replay.map((item) => item.text));
 				return { consume: true };
@@ -186,6 +200,7 @@ export function createClaudeInterrupt(pi: ExtensionAPI): void {
 			if (queue.length === 0 || queue.some((item) => item.hasImages)) return;
 
 			const draft = ctx.ui.getEditorText();
+			ownsEscape = true;
 			interrupt = {
 				phase: "aborting",
 				queues: pending,
