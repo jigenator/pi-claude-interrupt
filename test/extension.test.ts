@@ -6,6 +6,8 @@ import { visibleWidth, type Component, type TUI } from "@earendil-works/pi-tui";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
+	CustomEntry,
+	EntryRenderer,
 	InputEvent,
 	Theme,
 } from "@earendil-works/pi-coding-agent";
@@ -32,7 +34,18 @@ function harness(t: TestContext, mode: ExtensionContext["mode"] = "tui") {
 	let widgetShows = 0;
 	let color = "\x1b[36m";
 	const tui = { requestRender: () => { renderRequests++; } } as unknown as TUI;
-	const theme = { fg: (_key: string, text: string) => `${color}${text}\x1b[0m` } as Theme;
+	const theme = { fg: (key: string, text: string) => {
+		assert.equal(key, "accent");
+		return `${color}${text}\x1b[0m`;
+	} } as Theme;
+	let entryRenderer: EntryRenderer | undefined;
+	const markers: { entry: CustomEntry; component: Component }[] = [];
+	const loadEntry = (entry: CustomEntry): void => {
+		assert.ok(entryRenderer);
+		const component = entryRenderer(entry, { expanded: false }, theme);
+		assert.ok(component);
+		markers.push({ entry, component });
+	};
 
 	const emitSync = (name: string, event: any, ctx: ExtensionContext): unknown => {
 		let result: unknown;
@@ -41,6 +54,14 @@ function harness(t: TestContext, mode: ExtensionContext["mode"] = "tui") {
 	};
 
 	const pi = {
+		registerEntryRenderer(customType: string, renderer: EntryRenderer) {
+			assert.equal(customType, "claude-interrupt-steering");
+			entryRenderer = renderer;
+		},
+		appendEntry(customType: string, data: unknown) {
+			loadEntry({ type: "custom", id: `entry-${markers.length}`, parentId: null,
+				timestamp: new Date().toISOString(), customType, data });
+		},
 		on(name: string, handler: Handler) {
 			handlers.set(name, [...(handlers.get(name) ?? []), handler]);
 			return () => undefined;
@@ -110,6 +131,9 @@ function harness(t: TestContext, mode: ExtensionContext["mode"] = "tui") {
 	return {
 		ctx,
 		sent,
+		markers,
+		loadEntry,
+		renderMarker: (index = markers.length - 1, width = 80) => markers[index]?.component.render(width),
 		renderWidget: (width = 80) => widget?.render(width),
 		disposeWidget() {
 			widget?.dispose?.();
@@ -340,35 +364,43 @@ function startContinuation(h: ReturnType<typeof harness>) {
 	h.emit("agent_start", { type: "agent_start" });
 }
 
-test("steering widget sweeps, holds a checkmark, clips and clears without changing the draft", (t) => {
+test("history marker sweeps every 150ms for all 20 steps then persists without changing the draft", (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout"] });
 	const h = harness(t);
 	h.setDraft("keep my cursor text");
 	startContinuation(h);
-
-	for (const indicator of ["›··", "·›·", "··›", "›··", "·›·", "··›", " ✓ "]) {
-		assert.deepEqual(h.renderWidget()?.map(stripAnsi), [`${indicator}  Conversation Steered`]);
+	assert.equal(h.markers.length, 1);
+	for (let step = 0; step < 20; step++) {
+		const indicator = ["›··", "·›·", "··›"][step % 3];
+		assert.deepEqual(h.renderMarker()?.map(stripAnsi), [`${indicator}  Conversation Steered`]);
+		assert.deepEqual(h.renderWidget(), []); // No second visible copy.
 		for (const width of [0, 1, 3, 12, 25]) {
-			const lines = h.renderWidget(width)!;
+			const lines = h.renderMarker(0, width)!;
 			assert.equal(lines.length, 1);
 			assert.ok(visibleWidth(lines[0]) <= width);
 		}
-		if (indicator !== " ✓ ") t.mock.timers.tick(150);
+		t.mock.timers.tick(149);
+		assert.deepEqual(h.renderMarker()?.map(stripAnsi), [`${indicator}  Conversation Steered`]);
+		t.mock.timers.tick(1);
+		assert.equal(h.renderRequests, step + 1);
 	}
-	assert.equal(h.renderRequests, 6);
+	assert.deepEqual(h.renderMarker()?.map(stripAnsi), [" ✓   Conversation Steered"]);
+	assert.equal(h.renderWidget(), undefined);
 	assert.equal(h.widgetShows, 1);
 	h.setColor("\x1b[35m");
-	assert.ok(h.renderWidget()![0].startsWith("\x1b[35m"));
-	t.mock.timers.tick(999);
-	assert.ok(h.renderWidget());
-	t.mock.timers.tick(1);
-	assert.equal(h.renderWidget(), undefined);
+	assert.ok(h.renderMarker()![0].startsWith("\x1b[35m"));
+	h.emit("message_start", userMessageStart);
+	h.emit("tool_execution_start", { type: "tool_execution_start" });
+	h.emit("agent_start", { type: "agent_start" });
+	t.mock.timers.tick(60_000);
 	t.mock.timers.runAll();
-	assert.equal(h.renderRequests, 6);
+	assert.equal(h.renderRequests, 20);
+	assert.equal(h.markers.length, 1);
+	assert.deepEqual(h.renderMarker()?.map(stripAnsi), [" ✓   Conversation Steered"]);
 	assert.equal(h.draft, "keep my cursor text");
 });
 
-test("widget waits for a confirmed continuation and stays out of native and non-TUI paths", (t) => {
+test("marker waits for confirmed continuation and stays out of ordinary, native and non-TUI paths", (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout"] });
 	const h = harness(t);
 	h.emit("agent_start", { type: "agent_start" });
@@ -376,45 +408,70 @@ test("widget waits for a confirmed continuation and stays out of native and non-
 	h.input("image", "steer", true);
 	h.setCorePending(true);
 	h.escape();
-	assert.equal(h.widgetShows, 0);
+	assert.equal(h.markers.length, 0);
 	h.emit("session_start", { type: "session_start" });
 	h.input("retry me", "steer");
 	h.setCorePending(true);
 	h.escape();
 	h.emit("agent_settled", { type: "agent_settled" });
 	t.mock.timers.runAll(); // Preflight never reaches agent_start.
-	assert.equal(h.widgetShows, 0);
+	assert.equal(h.markers.length, 0);
 	h.escape();
 	h.emit("agent_start", { type: "agent_start" });
+	assert.equal(h.markers.length, 0);
 	assert.equal(h.widgetShows, 0);
 
 	const rpc = harness(t, "rpc");
 	startContinuation(rpc);
 	assert.equal(rpc.aborts, 0);
+	assert.equal(rpc.markers.length, 0);
 	assert.equal(rpc.widgetShows, 0);
 });
 
-test("widget replacement, disposal and session cleanup cancel every old timer", (t) => {
+test("saved markers reload completed and distinct identities never animate old entries", (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const first = harness(t);
+	startContinuation(first);
+	const saved = structuredClone(first.markers[0].entry);
+	const h = harness(t);
+	h.loadEntry(saved);
+	assert.deepEqual(h.renderMarker()?.map(stripAnsi), [" ✓   Conversation Steered"]);
+	assert.equal(h.widgetShows, 0);
+	startContinuation(h);
+	assert.notDeepEqual(h.markers[0].entry.data, h.markers[1].entry.data);
+	assert.deepEqual(h.renderMarker(0)?.map(stripAnsi), [" ✓   Conversation Steered"]);
+	t.mock.timers.tick(150);
+	assert.deepEqual(h.renderMarker(1)?.map(stripAnsi), ["·›·  Conversation Steered"]);
+	startContinuation(h);
+	assert.equal(new Set(h.markers.map(({ entry }) => (entry.data as { id: string }).id)).size, 3);
+	assert.deepEqual(h.renderMarker(0)?.map(stripAnsi), [" ✓   Conversation Steered"]);
+	assert.deepEqual(h.renderMarker(1)?.map(stripAnsi), [" ✓   Conversation Steered"]);
+	assert.deepEqual(h.renderMarker(2)?.map(stripAnsi), ["›··  Conversation Steered"]);
+	t.mock.timers.tick(150);
+	assert.equal(h.renderRequests, 3); // Old frame, its finalization, new frame only.
+	for (let step = 1; step < 20; step++) t.mock.timers.tick(150);
+	t.mock.timers.runAll();
+	assert.equal(h.renderRequests, 22);
+	assert.deepEqual(h.renderMarker(2)?.map(stripAnsi), [" ✓   Conversation Steered"]);
+});
+
+test("Escape, widget disposal and session cleanup finalize history and cancel every timer", (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout"] });
 	const h = harness(t);
-	startContinuation(h);
-	t.mock.timers.tick(150);
-	startContinuation(h);
-	assert.equal(h.widgetShows, 2);
-	assert.deepEqual(h.renderWidget()?.map(stripAnsi), ["›··  Conversation Steered"]);
-	t.mock.timers.tick(150);
-	assert.equal(h.renderRequests, 2); // One frame from each animation, not an old timer too.
-
 	for (const cleanup of [
+		() => h.escape(),
 		() => h.disposeWidget(),
 		() => h.emit("session_start", { type: "session_start" }),
 		() => h.emit("session_shutdown", { type: "session_shutdown" }),
 	]) {
+		h.emit("session_start", { type: "session_start" });
 		startContinuation(h);
+		t.mock.timers.tick(150);
 		cleanup();
 		const renders: number = h.renderRequests;
 		t.mock.timers.runAll();
 		assert.equal(h.renderWidget(), undefined);
+		assert.deepEqual(h.renderMarker()?.map(stripAnsi), [" ✓   Conversation Steered"]);
 		assert.equal(h.renderRequests, renders);
 	}
 });

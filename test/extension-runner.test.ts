@@ -12,7 +12,7 @@ import {
 	type ExtensionContextActions,
 	type ExtensionUIContext,
 	type ModelRegistry,
-	type SessionManager,
+	SessionManager,
 	type TerminalInputHandler,
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
@@ -20,7 +20,7 @@ import {
 type Delivery = "steer" | "followUp";
 type Queued = { text: string; deliverAs: Delivery };
 
-async function createRunnerHarness(t: TestContext) {
+async function createRunnerHarness(t: TestContext, savedSession?: SessionManager) {
 	const root = dirname(dirname(fileURLToPath(import.meta.url)));
 	const loaded = await discoverAndLoadExtensions(
 		[join(root, "src/index.ts")],
@@ -41,12 +41,17 @@ async function createRunnerHarness(t: TestContext) {
 	const trace: string[] = [];
 	const jobs = new Set<Promise<void>>();
 	let widget: (Component & { dispose?(): void }) | undefined;
+	let renderRequests = 0;
+	let widgetDisposals = 0;
+	const session = savedSession ?? SessionManager.inMemory(root);
+	const theme = { fg: (_key: string, text: string) => text } as Theme;
+	const components = new Map<string, Component>();
 
 	const runner = new ExtensionRunner(
 		loaded.extensions,
 		loaded.runtime,
 		root,
-		{} as SessionManager,
+		session,
 		{} as ModelRegistry,
 	);
 
@@ -56,7 +61,7 @@ async function createRunnerHarness(t: TestContext) {
 	};
 
 	const actions: ExtensionActions = {
-		sendMessage: () => undefined,
+		sendMessage: () => { assert.fail("Steering feedback must not enter model context"); },
 		sendUserMessage: (content, options) => {
 			assert.equal(typeof content, "string");
 			const text = content as string;
@@ -89,10 +94,21 @@ async function createRunnerHarness(t: TestContext) {
 					type: "message_start",
 					message: { role: "user", content: [{ type: "text", text }], timestamp: Date.now() },
 				});
+				session.appendMessage({ role: "user", content: text, timestamp: Date.now() });
 				delivered.push(text);
 			});
 		},
-		appendEntry: () => undefined,
+		appendEntry: (customType, data) => {
+			const id = session.appendCustomEntry(customType, data);
+			const entry = session.getEntry(id);
+			assert.ok(entry?.type === "custom");
+			const renderer = runner.getEntryRenderer(customType);
+			assert.ok(renderer);
+			const component = renderer(entry, { expanded: false }, theme);
+			assert.ok(component);
+			components.set(id, component);
+			trace.push(`marker:${id}`);
+		},
 		setSessionName: () => undefined,
 		getSessionName: () => undefined,
 		setLabel: () => undefined,
@@ -142,11 +158,14 @@ async function createRunnerHarness(t: TestContext) {
 		},
 		notify: () => undefined,
 		setWidget: (_key: string, factory: ((tui: TUI, theme: Theme) => typeof widget) | undefined) => {
-			widget?.dispose?.();
+			if (widget) {
+				widgetDisposals++;
+				widget.dispose?.();
+			}
 			widget = undefined;
 			if (factory) widget = factory(
-				{ requestRender: () => undefined } as unknown as TUI,
-				{ fg: (_key: string, text: string) => text } as Theme,
+				{ requestRender: () => { renderRequests++; } } as unknown as TUI,
+				theme,
 			);
 		},
 	} as unknown as ExtensionUIContext;
@@ -162,6 +181,19 @@ async function createRunnerHarness(t: TestContext) {
 
 	return {
 		runner,
+		session,
+		get renderRequests() { return renderRequests; },
+		get widgetDisposals() { return widgetDisposals; },
+		renderMarkers: () => session.getBranch().flatMap((entry) => {
+			if (entry.type !== "custom") return [];
+			let component = components.get(entry.id);
+			if (!component) {
+				component = runner.getEntryRenderer(entry.customType)?.(entry, { expanded: false }, theme);
+				assert.ok(component);
+				components.set(entry.id, component);
+			}
+			return component.render(80);
+		}),
 		renderWidget: () => widget?.render(80),
 		coreQueue,
 		started,
@@ -203,6 +235,7 @@ async function createRunnerHarness(t: TestContext) {
 					timestamp: Date.now(),
 				},
 			});
+			session.appendMessage({ role: "user", content: message.text, timestamp: Date.now() });
 			delivered.push(message.text);
 		},
 	};
@@ -217,14 +250,16 @@ test("real ExtensionRunner asynchronously re-interrupts a replayed queue without
 	assert.deepEqual(h.escape(), { consume: true });
 	await h.settle();
 	assert.deepEqual(h.started, ["first"]);
-	assert.deepEqual(h.renderWidget(), ["›··  Conversation Steered"]);
+	assert.deepEqual(h.renderWidget(), []);
+	assert.deepEqual(h.renderMarkers(), ["›··  Conversation Steered"]);
 	assert.deepEqual(h.coreQueue.map((item) => item.text), ["second", "third"]);
 
 	// Interrupt before either replayed queue entry reaches message_start.
 	assert.deepEqual(h.escape(), { consume: true });
 	await h.settle();
 	assert.deepEqual(h.started, ["first", "second"]);
-	assert.deepEqual(h.renderWidget(), ["›··  Conversation Steered"]);
+	assert.deepEqual(h.renderWidget(), []);
+	assert.deepEqual(h.renderMarkers(), [" ✓   Conversation Steered", "›··  Conversation Steered"]);
 	assert.deepEqual(h.coreQueue.map((item) => item.text), ["third"], h.trace.join(" | "));
 
 	await h.deliverQueued();
@@ -243,8 +278,56 @@ test("real ExtensionRunner leaves Escape available after asynchronous start fail
 	await h.settle();
 	assert.deepEqual(h.started, []);
 	assert.equal(h.renderWidget(), undefined);
+	assert.deepEqual(h.renderMarkers(), []);
 
 	assert.deepEqual(h.escape(), { consume: true });
 	assert.equal(h.editorText, "retry me\n\nthen me\n\ndraft");
 	assert.equal(h.escape(), undefined);
+});
+
+test("real ExtensionRunner persists exactly one non-context marker at start and reloads it completed", async (t) => {
+	const h = await createRunnerHarness(t);
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	await h.queue("continue here", "steer");
+	await h.queue("later action", "followUp");
+	h.escape();
+	await h.settle();
+	const markers = h.session.getEntries().filter((entry) => entry.type === "custom");
+	assert.equal(markers.length, 1);
+	assert.equal(markers[0].customType, "claude-interrupt-steering");
+	assert.ok(h.trace.indexOf(`marker:${markers[0].id}`) > h.trace.indexOf("started:continue here"));
+	assert.ok(h.trace.indexOf(`marker:${markers[0].id}`) < h.trace.indexOf("queued:later action"));
+	assert.deepEqual(h.renderMarkers(), ["›··  Conversation Steered"]);
+	assert.deepEqual(h.renderWidget(), []);
+	for (let step = 1; step <= 20; step++) t.mock.timers.tick(150);
+	assert.deepEqual(h.renderMarkers(), [" ✓   Conversation Steered"]);
+	assert.equal(h.renderRequests, 20);
+	assert.equal(h.widgetDisposals, 1);
+	assert.equal(h.renderWidget(), undefined);
+	await h.deliverQueued();
+	await h.runner.emit({ type: "agent_start" }); // Ordinary activity cannot add a marker.
+	t.mock.timers.tick(60_000);
+	assert.equal(h.renderRequests, 20);
+	assert.deepEqual(h.renderMarkers(), [" ✓   Conversation Steered"]);
+	assert.equal(h.session.getEntries().filter((entry) => entry.type === "custom").length, 1);
+	assert.ok(h.session.buildContextEntries().some((entry) => entry.id === markers[0].id));
+	assert.deepEqual(h.session.buildSessionContext().messages.map((message) => message.role), ["user", "user"]);
+	assert.ok(!JSON.stringify(h.session.buildSessionContext()).includes("claude-interrupt-steering"));
+
+	await h.runner.emit({ type: "session_shutdown", reason: "reload" });
+	const reloaded = await createRunnerHarness(t, h.session);
+	assert.deepEqual(reloaded.renderMarkers(), [" ✓   Conversation Steered"]);
+	assert.equal(reloaded.renderWidget(), undefined);
+	await reloaded.queue("new continuation", "steer");
+	reloaded.escape();
+	await reloaded.settle();
+	assert.deepEqual(reloaded.renderMarkers(), [" ✓   Conversation Steered", "›··  Conversation Steered"]);
+	const ids = reloaded.session.getEntries().flatMap((entry) => entry.type === "custom" ? [(entry.data as { id: string }).id] : []);
+	assert.equal(new Set(ids).size, 2);
+	await reloaded.runner.emit({ type: "session_shutdown", reason: "quit" });
+	const renders = reloaded.renderRequests;
+	t.mock.timers.runAll();
+	assert.equal(reloaded.renderRequests, renders);
+	assert.equal(reloaded.widgetDisposals, 1);
+	assert.deepEqual(reloaded.renderMarkers(), [" ✓   Conversation Steered", " ✓   Conversation Steered"]);
 });

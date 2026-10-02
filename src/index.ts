@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -53,20 +54,37 @@ export function createClaudeInterrupt(pi: ExtensionAPI): void {
 	let expectedReplay: PendingText[] = [];
 	let skipNextUserStart = false;
 	let unsubscribeTerminal: (() => void) | undefined;
-	let animationTimer: ReturnType<typeof setTimeout> | undefined;
-	let widgetContext: ExtensionContext | undefined;
-	const widgetKey = "claude-interrupt-steering";
+	const markerType = "claude-interrupt-steering";
+	let animation: {
+		id: string;
+		frame: number;
+		ctx: ExtensionContext;
+		timer?: ReturnType<typeof setTimeout>;
+		requestRender?: () => void;
+	} | undefined;
+
+	// Only this runtime's live identity animates. Saved entries always render done.
+	pi.registerEntryRenderer<{ id: string }>(markerType, (entry, _options, theme) => ({
+		render: (width) => {
+			const live = animation && entry.data?.id === animation.id ? animation : undefined;
+			const indicator = live ? ["›··", "·›·", "··›"][live.frame % 3] : " ✓ ";
+			return [truncateToWidth(theme.fg("accent", `${indicator}  Conversation Steered`), width)];
+		},
+		invalidate() {},
+	}));
 
 	const disposeAnimation = (): void => {
-		clearTimeout(animationTimer);
-		animationTimer = undefined;
-		widgetContext = undefined;
+		const live = animation;
+		if (!live) return;
+		clearTimeout(live.timer);
+		animation = undefined;
+		live.requestRender?.(); // Finalize the transcript row, never remove it.
 	};
 
 	const clearAnimation = (): void => {
-		const ctx = widgetContext;
+		const ctx = animation?.ctx;
 		disposeAnimation();
-		ctx?.ui.setWidget(widgetKey, undefined);
+		ctx?.ui.setWidget(markerType, undefined);
 	};
 
 	const reset = (): void => {
@@ -217,23 +235,29 @@ export function createClaudeInterrupt(pi: ExtensionAPI): void {
 
 		clearAnimation();
 		if (ctx.mode === "tui") {
-			widgetContext = ctx;
-			ctx.ui.setWidget(widgetKey, (tui, theme) => {
-				let frame = 0;
-				const frames = ["›··", "·›·", "··›", "›··", "·›·", "··›", " ✓ "];
+			const live: NonNullable<typeof animation> = { id: randomUUID(), frame: 0, ctx };
+			animation = live;
+			pi.appendEntry(markerType, { id: live.id });
+			// Entry renderers have no TUI handle. This zero-row widget supplies only
+			// redraw/lifecycle access; the single visible row belongs to history.
+			ctx.ui.setWidget(markerType, (tui) => {
+				live.requestRender = () => tui.requestRender();
 				const advance = (): void => {
-					frame++;
+					if (animation !== live) return;
+					live.frame++;
+					if (live.frame === 20) {
+						clearAnimation();
+						return;
+					}
 					tui.requestRender();
-					animationTimer = setTimeout(frame === 6 ? clearAnimation : advance, frame === 6 ? 1000 : 150);
+					live.timer = setTimeout(advance, 150);
 				};
-				animationTimer = setTimeout(advance, 150);
+				live.timer = setTimeout(advance, 150);
 				return {
-					render: (width: number) => [
-						truncateToWidth(theme.fg("accent", `${frames[frame]}  Conversation Steered`), width),
-					],
+					render: () => [],
 					invalidate() {},
-					// Pi calls dispose before removing the widget; do not call setWidget here.
-					dispose: disposeAnimation,
+					// Pi disposes before removal; never recurse into setWidget here.
+					dispose: () => { if (animation === live) disposeAnimation(); },
 				};
 			});
 		}
