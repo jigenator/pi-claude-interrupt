@@ -3,7 +3,8 @@ import { setImmediate as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
-import { TuiMainScreen, type TUI, type Component, type Terminal } from "@earendil-works/pi-tui";
+import { stripVTControlCharacters as stripAnsi } from "node:util";
+import { TuiMainScreen, visibleWidth, type TUI, type Component, type Terminal } from "@earendil-works/pi-tui";
 
 import {
 	discoverAndLoadExtensions,
@@ -14,11 +15,17 @@ import {
 	type ModelRegistry,
 	SessionManager,
 	type TerminalInputHandler,
-	type Theme,
+	Theme,
 } from "@earendil-works/pi-coding-agent";
 
 type Delivery = "steer" | "followUp";
 type Queued = { text: string; deliverAs: Delivery };
+
+// Rendered rows reduced to their label/indicator columns at Pi's default outputPad 1.
+const live = (indicator: string) => ` DIRECTIVE UPDATED  ${indicator} `;
+const settled = live("✓  ");
+const conveyor = (step: number) => ["▶··", "›▶·", "·›▶"][Math.floor(step / 2) % 3];
+const indicatorAt = (step: number) => step >= 34 ? "✓  " : conveyor(step);
 
 async function createRunnerHarness(t: TestContext, savedSession?: SessionManager) {
 	const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -58,7 +65,12 @@ async function createRunnerHarness(t: TestContext, savedSession?: SessionManager
 	let renderRequests = 0;
 	let widgetDisposals = 0;
 	const session = savedSession ?? SessionManager.inMemory(root);
-	const theme = { fg: (_key: string, text: string) => text } as Theme;
+	// A real Pi Theme exercises the renderer's style calls and color conversion.
+	const theme = new Theme(
+		{ accent: "#5f87ff", muted: "#808080", text: "#d0d0d0", thinkingXhigh: "#d0d0d0" } as ConstructorParameters<typeof Theme>[0],
+		{ selectedBg: "#303030" } as ConstructorParameters<typeof Theme>[1],
+		"truecolor",
+	);
 	const components = new Map<string, Component>();
 
 	const runner = new ExtensionRunner(
@@ -204,7 +216,10 @@ async function createRunnerHarness(t: TestContext, savedSession?: SessionManager
 				assert.ok(component);
 				components.set(entry.id, component);
 			}
-			return component.render(80);
+			const lines = component.render(80);
+			assert.equal(lines.length, 1);
+			assert.equal(visibleWidth(lines[0]), 79, "rule stops at the right outputPad column");
+			return lines.map((line) => stripAnsi(line).slice(0, 24));
 		}),
 		renderWidget: () => widget?.render(80),
 		coreQueue,
@@ -266,7 +281,7 @@ test("real ExtensionRunner asynchronously re-interrupts a replayed queue without
 	await h.settle();
 	assert.deepEqual(h.started, ["first"]);
 	assert.deepEqual(h.renderWidget(), []);
-	assert.deepEqual(h.renderMarkers(), [" Conversation Steered ›··"]);
+	assert.deepEqual(h.renderMarkers(), [live("▶··")]);
 	assert.deepEqual(h.coreQueue.map((item) => item.text), ["second", "third"]);
 
 	// Interrupt before either replayed queue entry reaches message_start.
@@ -274,7 +289,7 @@ test("real ExtensionRunner asynchronously re-interrupts a replayed queue without
 	await h.settle();
 	assert.deepEqual(h.started, ["first", "second"]);
 	assert.deepEqual(h.renderWidget(), []);
-	assert.deepEqual(h.renderMarkers(), [" Conversation Steered  ✓ ", " Conversation Steered ›··"]);
+	assert.deepEqual(h.renderMarkers(), [settled, live("▶··")]);
 	assert.deepEqual(h.coreQueue.map((item) => item.text), ["third"], h.trace.join(" | "));
 
 	await h.deliverQueued();
@@ -302,7 +317,7 @@ test("real ExtensionRunner leaves Escape available after asynchronous start fail
 
 test("real ExtensionRunner persists exactly one non-context marker at start and reloads it completed", async (t) => {
 	const h = await createRunnerHarness(t);
-	t.mock.timers.enable({ apis: ["setTimeout"] });
+	t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
 	await h.queue("continue here", "steer");
 	await h.queue("later action", "followUp");
 	h.escape();
@@ -312,18 +327,24 @@ test("real ExtensionRunner persists exactly one non-context marker at start and 
 	assert.equal(markers[0].customType, "claude-interrupt-steering");
 	assert.ok(h.trace.indexOf(`marker:${markers[0].id}`) > h.trace.indexOf("started:continue here"));
 	assert.ok(h.trace.indexOf(`marker:${markers[0].id}`) < h.trace.indexOf("queued:later action"));
-	assert.deepEqual(h.renderMarkers(), [" Conversation Steered ›··"]);
+	assert.deepEqual(h.renderMarkers(), [live("▶··")]);
 	assert.deepEqual(h.renderWidget(), []);
-	for (let step = 1; step <= 20; step++) t.mock.timers.tick(150);
-	assert.deepEqual(h.renderMarkers(), [" Conversation Steered  ✓ "]);
-	assert.equal(h.renderRequests, 20);
+	for (let step = 1; step <= 37; step++) {
+		t.mock.timers.tick(80);
+		assert.deepEqual(h.renderMarkers(), [live(indicatorAt(step))]);
+	}
+	t.mock.timers.tick(39);
+	assert.deepEqual(h.renderWidget(), [], "the last partial interval is kept");
+	t.mock.timers.tick(1);
+	assert.deepEqual(h.renderMarkers(), [settled]);
+	assert.equal(h.renderRequests, 38);
 	assert.equal(h.widgetDisposals, 1);
 	assert.equal(h.renderWidget(), undefined);
 	await h.deliverQueued();
 	await h.runner.emit({ type: "agent_start" }); // Ordinary activity cannot add a marker.
 	t.mock.timers.tick(60_000);
-	assert.equal(h.renderRequests, 20);
-	assert.deepEqual(h.renderMarkers(), [" Conversation Steered  ✓ "]);
+	assert.equal(h.renderRequests, 38);
+	assert.deepEqual(h.renderMarkers(), [settled]);
 	assert.equal(h.session.getEntries().filter((entry) => entry.type === "custom").length, 1);
 	assert.ok(h.session.buildContextEntries().some((entry) => entry.id === markers[0].id));
 	assert.deepEqual(h.session.buildSessionContext().messages.map((message) => message.role), ["user", "user"]);
@@ -331,12 +352,12 @@ test("real ExtensionRunner persists exactly one non-context marker at start and 
 
 	await h.runner.emit({ type: "session_shutdown", reason: "reload" });
 	const reloaded = await createRunnerHarness(t, h.session);
-	assert.deepEqual(reloaded.renderMarkers(), [" Conversation Steered  ✓ "]);
+	assert.deepEqual(reloaded.renderMarkers(), [settled]);
 	assert.equal(reloaded.renderWidget(), undefined);
 	await reloaded.queue("new continuation", "steer");
 	reloaded.escape();
 	await reloaded.settle();
-	assert.deepEqual(reloaded.renderMarkers(), [" Conversation Steered  ✓ ", " Conversation Steered ›··"]);
+	assert.deepEqual(reloaded.renderMarkers(), [settled, live("▶··")]);
 	const ids = reloaded.session.getEntries().flatMap((entry) => entry.type === "custom" ? [(entry.data as { id: string }).id] : []);
 	assert.equal(new Set(ids).size, 2);
 	await reloaded.runner.emit({ type: "session_shutdown", reason: "quit" });
@@ -344,12 +365,12 @@ test("real ExtensionRunner persists exactly one non-context marker at start and 
 	t.mock.timers.runAll();
 	assert.equal(reloaded.renderRequests, renders);
 	assert.equal(reloaded.widgetDisposals, 1);
-	assert.deepEqual(reloaded.renderMarkers(), [" Conversation Steered  ✓ ", " Conversation Steered  ✓ "]);
+	assert.deepEqual(reloaded.renderMarkers(), [settled, settled]);
 });
 
 test("real TUI routes Kitty release before focus without ending continuation feedback", async (t) => {
 	const h = await createRunnerHarness(t);
-	t.mock.timers.enable({ apis: ["setTimeout"] });
+	t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
 	await h.queue("continue", "steer");
 	assert.deepEqual(h.escape("\x1b[27;1:1u"), { consume: true });
 	assert.deepEqual(h.escape("\x1b[27;1:2u"), { consume: true });
@@ -357,16 +378,16 @@ test("real TUI routes Kitty release before focus without ending continuation fee
 	assert.equal(h.aborts, 1);
 	await h.settle();
 	assert.deepEqual(h.started, ["continue"]);
-	for (let frame = 0; frame < 20; frame++) {
+	for (let step = 0; step <= 37; step++) {
 		h.escape("\x1b[27;1:3u"); // The real router still passes release to listeners.
 		assert.deepEqual(h.renderWidget(), []);
-		assert.deepEqual(h.renderMarkers(), [` Conversation Steered ${["›··", "·›·", "··›"][frame % 3]}`]);
-		t.mock.timers.tick(149);
+		assert.deepEqual(h.renderMarkers(), [live(indicatorAt(step))]);
+		t.mock.timers.tick(step === 37 ? 39 : 79);
 		assert.deepEqual(h.renderWidget(), []);
 		t.mock.timers.tick(1);
 	}
-	assert.deepEqual(h.renderMarkers(), [" Conversation Steered  ✓ "]);
-	assert.equal(h.renderRequests, 20);
+	assert.deepEqual(h.renderMarkers(), [settled]);
+	assert.equal(h.renderRequests, 38);
 	assert.deepEqual(h.focusedInput, [], "release filtered; owned press/repeat consumed before focus");
 	assert.equal(h.escape("\x1b[27;1:1u"), undefined);
 	assert.deepEqual(h.focusedInput, ["\x1b[27;1:1u"], "a new no-queue press reaches native focus");
@@ -374,7 +395,7 @@ test("real TUI routes Kitty release before focus without ending continuation fee
 
 test("real TUI keeps owned repeats out of native focus across failed preflight and live continuation", async (t) => {
 	const h = await createRunnerHarness(t);
-	t.mock.timers.enable({ apis: ["setTimeout"] });
+	t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
 	await h.queue("retry", "steer");
 	h.setAllowStart(false);
 	h.escape("\x1b[27;1:1u");
