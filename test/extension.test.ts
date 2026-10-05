@@ -13,12 +13,11 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { createClaudeInterrupt, renderMarker } from "../src/index.ts";
 
-// A real Pi Theme, so stubs cannot hide style API or color-mode errors. Its
-// token palette is deliberately light: the marker must own its own colors.
-function makeTheme(mode: TerminalColorMode, appearance: "dark" | "light" = "light"): Theme {
+// A real Pi Theme, so stubs cannot hide style API or color-mode errors.
+function makeTheme(mode: TerminalColorMode, appearance: "dark" | "light" = "dark"): Theme {
 	const ink = appearance === "light" ? "#202020" : "#e0e0e0";
 	const paper = appearance === "light" ? "#f4f4f4" : "#181818";
-	// Only the tokens these tests touch; the marker itself uses concrete colors.
+	// Only the tokens these tests touch, including the marker's light-theme accent.
 	const fg = { accent: ink, error: ink, muted: ink, text: ink, thinkingXhigh: ink };
 	const bg = { selectedBg: paper, customMessageBg: paper };
 	return new Theme(fg as ConstructorParameters<typeof Theme>[0], bg as ConstructorParameters<typeof Theme>[1], mode, { appearance });
@@ -434,18 +433,18 @@ const palettes = {
 	"256color": { acid: "@154", black: "@16", bone: "@231", grey: "@242", darkGrey: "@240" },
 } as const;
 
-/** L live plate, O acid on black, R grey record plate, T grey track, K bone tick, U rule, B black blank. */
+/** L live plate, O acid ink, R grey record plate, T grey track, K bone tick, U rule, B default-background blank. */
 function classes(line: string, mode: TerminalColorMode): string {
 	const c = palettes[mode];
 	return cells(line).map(({ ch, fg, bg, bold }) => {
 		const key = `${fg}/${bg}/${bold}`;
 		if (key === `${c.black}/${c.acid}/true`) return "L";
-		if (key === `${c.acid}/${c.black}/true`) return "O";
+		if (key === `${c.acid}/undefined/true`) return "O";
 		if (key === `${c.bone}/${c.darkGrey}/true`) return "R";
-		if (key === `${c.grey}/${c.black}/false`) return "T";
+		if (key === `${c.grey}/undefined/false`) return "T";
 		if (key === `${c.black}/${c.bone}/true`) return "K";
-		if (key === `${c.darkGrey}/${c.black}/false`) return "U";
-		if (ch === " " && fg === undefined && bg === c.black && !bold) return "B";
+		if (key === `${c.darkGrey}/undefined/false`) return "U";
+		if (ch === " " && fg === undefined && bg === undefined && !bold) return "B";
 		return "?";
 	}).join("");
 }
@@ -472,8 +471,13 @@ test("marker cells carry the approved Acid/Black colors and attributes in every 
 			const line = renderMarker(makeTheme(mode), 30, 1, elapsed);
 			assert.equal(stripAnsi(line), glyphs, `${mode} ${elapsed}`);
 			assert.equal(classes(line, mode), expected, `${mode} ${elapsed}`);
-			// Owned colors: identical on light and dark themes.
-			assert.equal(renderMarker(makeTheme(mode, "dark"), 30, 1, elapsed), line);
+			// Only plates/flash have backgrounds. Transparent acid ink follows the
+			// native accent on light themes; the plate colors and glyphs stay fixed.
+			const light = makeTheme(mode, "light");
+			const accent = cells(light.style("x", { fg: "accent", bold: true }))[0].fg;
+			assert.deepEqual(cells(renderMarker(light, 30, 1, elapsed)), cells(line).map((cell) => ({
+				...cell, fg: cell.fg === palettes[mode].acid && cell.bg === undefined ? accent : cell.fg,
+			})));
 		}
 	}
 	// outputPad 0 drops the leading plate cell so the label stays on column 0.
@@ -560,7 +564,8 @@ test("theme, color-mode and width changes during the animation keep the current 
 	assert.equal(head([line]), live("›▶·"));
 	assert.equal(classes(line, "256color").slice(0, 24), `${"L".repeat(19)}BOOTB`);
 	h.setTheme(makeTheme("truecolor", "light"));
-	assert.equal(classes(h.renderMarker()![0], "truecolor").slice(0, 24), `${"L".repeat(19)}BOOTB`);
+	assert.equal(head(h.renderMarker()), live("›▶·"));
+	assert.deepEqual(cells(h.renderMarker()![0])[20], { ch: "›", fg: "#202020", bg: undefined, bold: true });
 	assert.equal(h.renderRequests, before, "rendering never schedules work");
 	finishAnimation(t);
 	assert.equal(head(h.renderMarker()), settled);

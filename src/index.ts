@@ -58,26 +58,27 @@ const SNAP = 2720;
 const SETTLE_WIPE = 2800;
 const WINDOW = 3000;
 
-// Acid/Black palette. The marker owns every cell's colors so it reads the same
-// on light and dark themes; Pi converts them for truecolor or 256-color output.
+// Filled plates use the Acid/Black palette. Everything else keeps the terminal's
+// default background, including transparency; Pi handles color-mode conversion.
 const acid = parseColor("#c0fe04");
 const black = parseColor("#000000");
 const bone = parseColor("#ffffff");
 const grey = parseColor("#717171");
 const darkGrey = parseColor("#555555");
 const livePlate: ThemeStyle = { fg: black, bg: acid, bold: true };
-const outline: ThemeStyle = { fg: acid, bg: black, bold: true };
 const recordPlate: ThemeStyle = { fg: bone, bg: darkGrey, bold: true };
-const track: ThemeStyle = { fg: grey, bg: black };
+const track: ThemeStyle = { fg: grey };
 const tick: ThemeStyle = { fg: black, bg: bone, bold: true };
-const rule: ThemeStyle = { fg: darkGrey, bg: black };
-const blank: ThemeStyle = { bg: black };
+const rule: ThemeStyle = { fg: darkGrey };
+const blank: ThemeStyle = {};
 
 /**
  * One marker row at `elapsed` ms, or settled when undefined. The label starts
- * at the native outputPad column; the strip ends before the right padding.
+ * at the native outputPad column; the rule ends before the right padding.
  */
 export function renderMarker(theme: Theme, width: number, outputPad: 0 | 1, elapsed?: number): string {
+	// Acid needs a readable replacement when its background is no longer black.
+	const outline: ThemeStyle = { fg: theme.appearance === "light" ? "accent" : acid, bold: true };
 	const label = `${outputPad ? " " : ""}DIRECTIVE UPDATED `;
 	const plate = label.length;
 	const contentWidth = Math.max(0, width - outputPad);
