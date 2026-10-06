@@ -21,13 +21,18 @@ import {
 type Delivery = "steer" | "followUp";
 type Queued = { text: string; deliverAs: Delivery };
 
-// Rendered rows reduced to their label/indicator columns at Pi's default outputPad 1.
-const live = (indicator: string) => ` DIRECTIVE UPDATED  ${indicator} `;
-const settled = live("✓  ");
-// The same rows at outputPad 0: one column left, so the rule starts inside the 24-column slice.
-const unpadded = (row: string) => row.slice(1) + "─";
-const conveyor = (step: number) => ["▶··", "›▶·", "·›▶"][Math.floor(step / 2) % 3];
-const indicatorAt = (step: number) => step >= 34 ? "✓  " : conveyor(step);
+// Rendered rows reduced to plate, gap and the 16-cell bar span at Pi's default outputPad 1. Bars sit at
+// cells [0,1,3,5,8,11,15]; each shows from 160 + 40i until its ghost disappears at 560 + 40i. Ghost
+// colour is covered by the cell-level tests; the glyph is the same.
+const barCells = [0, 1, 3, 5, 8, 11, 15];
+const row = (elapsed?: number) => {
+	const frame = Math.floor((elapsed ?? 3000) / 40) * 40;
+	const span = Array.from({ length: 16 }, () => " ");
+	barCells.forEach((cell, bar) => { if (frame >= 160 + 40 * bar && frame < 560 + 40 * bar) span[cell] = "│"; });
+	return ` DIRECTIVE UPDATED  ${span.join("")}`;
+};
+// The same rows at outputPad 0: one column left, so a blank fills the 36-column slice.
+const unpadded = (text: string) => text.slice(1) + " ";
 
 async function createRunnerHarness(t: TestContext, savedSession?: SessionManager) {
 	const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -224,8 +229,8 @@ async function createRunnerHarness(t: TestContext, savedSession?: SessionManager
 			}
 			const lines = component.render(80);
 			assert.equal(lines.length, 1);
-			assert.equal(visibleWidth(lines[0]), rowWidth, "rule stops at the right outputPad column");
-			return lines.map((line) => stripAnsi(line).slice(0, 24));
+			assert.equal(visibleWidth(lines[0]), rowWidth, "row stops at the right outputPad column");
+			return lines.map((line) => stripAnsi(line).slice(0, 36));
 		}),
 		setOutputPad(value: 0 | 1 | undefined) { outputPad = value; },
 		/** Pi's session replacement order: shutdown handlers, then the old runner is invalidated. */
@@ -295,7 +300,7 @@ test("real ExtensionRunner asynchronously re-interrupts a replayed queue without
 	await h.settle();
 	assert.deepEqual(h.started, ["first"]);
 	assert.deepEqual(h.renderWidget(), []);
-	assert.deepEqual(h.renderMarkers(), [live("▶··")]);
+	assert.deepEqual(h.renderMarkers(), [row(0)]);
 	assert.deepEqual(h.coreQueue.map((item) => item.text), ["second", "third"]);
 
 	// Interrupt before either replayed queue entry reaches message_start.
@@ -303,7 +308,7 @@ test("real ExtensionRunner asynchronously re-interrupts a replayed queue without
 	await h.settle();
 	assert.deepEqual(h.started, ["first", "second"]);
 	assert.deepEqual(h.renderWidget(), []);
-	assert.deepEqual(h.renderMarkers(), [settled, live("▶··")]);
+	assert.deepEqual(h.renderMarkers(), [row(), row(0)]);
 	assert.deepEqual(h.coreQueue.map((item) => item.text), ["third"], h.trace.join(" | "));
 
 	await h.deliverQueued();
@@ -341,24 +346,24 @@ test("real ExtensionRunner persists exactly one non-context marker at start and 
 	assert.equal(markers[0].customType, "claude-interrupt-steering");
 	assert.ok(h.trace.indexOf(`marker:${markers[0].id}`) > h.trace.indexOf("started:continue here"));
 	assert.ok(h.trace.indexOf(`marker:${markers[0].id}`) < h.trace.indexOf("queued:later action"));
-	assert.deepEqual(h.renderMarkers(), [live("▶··")]);
+	assert.deepEqual(h.renderMarkers(), [row(0)]);
 	assert.deepEqual(h.renderWidget(), []);
-	for (let step = 1; step <= 37; step++) {
-		t.mock.timers.tick(80);
-		assert.deepEqual(h.renderMarkers(), [live(indicatorAt(step))]);
+	for (let frame = 1; frame <= 74; frame++) {
+		t.mock.timers.tick(40);
+		assert.deepEqual(h.renderMarkers(), [row(frame * 40)], `frame ${frame}`);
 	}
 	t.mock.timers.tick(39);
-	assert.deepEqual(h.renderWidget(), [], "the last partial interval is kept");
+	assert.deepEqual(h.renderWidget(), [], "the final 40ms interval is kept");
 	t.mock.timers.tick(1);
-	assert.deepEqual(h.renderMarkers(), [settled]);
-	assert.equal(h.renderRequests, 38);
+	assert.deepEqual(h.renderMarkers(), [row()]);
+	assert.equal(h.renderRequests, 75);
 	assert.equal(h.widgetDisposals, 1);
 	assert.equal(h.renderWidget(), undefined);
 	await h.deliverQueued();
 	await h.runner.emit({ type: "agent_start" }); // Ordinary activity cannot add a marker.
 	t.mock.timers.tick(60_000);
-	assert.equal(h.renderRequests, 38);
-	assert.deepEqual(h.renderMarkers(), [settled]);
+	assert.equal(h.renderRequests, 75);
+	assert.deepEqual(h.renderMarkers(), [row()]);
 	assert.equal(h.session.getEntries().filter((entry) => entry.type === "custom").length, 1);
 	assert.ok(h.session.buildContextEntries().some((entry) => entry.id === markers[0].id));
 	assert.deepEqual(h.session.buildSessionContext().messages.map((message) => message.role), ["user", "user"]);
@@ -366,12 +371,12 @@ test("real ExtensionRunner persists exactly one non-context marker at start and 
 
 	await h.runner.emit({ type: "session_shutdown", reason: "reload" });
 	const reloaded = await createRunnerHarness(t, h.session);
-	assert.deepEqual(reloaded.renderMarkers(), [settled]);
+	assert.deepEqual(reloaded.renderMarkers(), [row()]);
 	assert.equal(reloaded.renderWidget(), undefined);
 	await reloaded.queue("new continuation", "steer");
 	reloaded.escape();
 	await reloaded.settle();
-	assert.deepEqual(reloaded.renderMarkers(), [settled, live("▶··")]);
+	assert.deepEqual(reloaded.renderMarkers(), [row(), row(0)]);
 	const ids = reloaded.session.getEntries().flatMap((entry) => entry.type === "custom" ? [(entry.data as { id: string }).id] : []);
 	assert.equal(new Set(ids).size, 2);
 	await reloaded.runner.emit({ type: "session_shutdown", reason: "quit" });
@@ -379,7 +384,7 @@ test("real ExtensionRunner persists exactly one non-context marker at start and 
 	t.mock.timers.runAll();
 	assert.equal(reloaded.renderRequests, renders);
 	assert.equal(reloaded.widgetDisposals, 1);
-	assert.deepEqual(reloaded.renderMarkers(), [settled, settled]);
+	assert.deepEqual(reloaded.renderMarkers(), [row(), row()]);
 });
 
 test("real TUI routes Kitty release before focus without ending continuation feedback", async (t) => {
@@ -392,16 +397,16 @@ test("real TUI routes Kitty release before focus without ending continuation fee
 	assert.equal(h.aborts, 1);
 	await h.settle();
 	assert.deepEqual(h.started, ["continue"]);
-	for (let step = 0; step <= 37; step++) {
+	for (let frame = 0; frame <= 74; frame++) {
 		h.escape("\x1b[27;1:3u"); // The real router still passes release to listeners.
 		assert.deepEqual(h.renderWidget(), []);
-		assert.deepEqual(h.renderMarkers(), [live(indicatorAt(step))]);
-		t.mock.timers.tick(step === 37 ? 39 : 79);
+		assert.deepEqual(h.renderMarkers(), [row(frame * 40)], `frame ${frame}`);
+		t.mock.timers.tick(39);
 		assert.deepEqual(h.renderWidget(), []);
 		t.mock.timers.tick(1);
 	}
-	assert.deepEqual(h.renderMarkers(), [settled]);
-	assert.equal(h.renderRequests, 38);
+	assert.deepEqual(h.renderMarkers(), [row()]);
+	assert.equal(h.renderRequests, 75);
 	assert.deepEqual(h.focusedInput, [], "release filtered; owned press/repeat consumed before focus");
 	assert.equal(h.escape("\x1b[27;1:1u"), undefined);
 	assert.deepEqual(h.focusedInput, ["\x1b[27;1:1u"], "a new no-queue press reaches native focus");
@@ -439,20 +444,23 @@ test("real ExtensionRunner keeps retained marker components renderable after ses
 	await h.queue("continue here", "steer");
 	h.escape();
 	await h.settle();
-	assert.deepEqual(h.renderMarkers(), [live("▶··")]);
+	assert.deepEqual(h.renderMarkers(), [row(0)]);
+	for (let frame = 0; frame < 10; frame++) t.mock.timers.tick(40); // 400ms: all seven bars are live.
+	assert.deepEqual(h.renderMarkers(), [row(400)]);
+	assert.equal(row(400), " DIRECTIVE UPDATED  ││ │ │  │  │   │");
 
 	// Pi does not rebuild entry components when outputPad changes mid-stream.
 	h.setOutputPad(0);
-	assert.deepEqual(h.renderMarkers(), [unpadded(live("▶··"))]);
+	assert.deepEqual(h.renderMarkers(), [unpadded(row(400))]);
 
 	await h.replaceSession();
 	h.assertRuntimeStale();
 	assert.equal(h.widgetDisposals, 1, "shutdown disposes the zero-row widget");
 	// Components of the old session stay in Pi's transcript until the new session
 	// rebinds it; their renderer must not call the invalidated runtime.
-	assert.deepEqual(h.renderMarkers(), [unpadded(settled)], "finalized, keeping the last live outputPad");
+	assert.deepEqual(h.renderMarkers(), [unpadded(row())], "finalized, keeping the last live outputPad");
 	h.setOutputPad(1); // Settings are no longer read once the runtime is retired.
-	assert.deepEqual(h.renderMarkers(80), [unpadded(settled)]);
+	assert.deepEqual(h.renderMarkers(80), [unpadded(row())]);
 
 	const renders = h.renderRequests;
 	t.mock.timers.runAll();
@@ -460,7 +468,7 @@ test("real ExtensionRunner keeps retained marker components renderable after ses
 
 	// The replacement runtime renders the saved entry with its own settings.
 	const next = await createRunnerHarness(t, h.session);
-	assert.deepEqual(next.renderMarkers(), [settled]);
+	assert.deepEqual(next.renderMarkers(), [row()]);
 	next.setOutputPad(0);
-	assert.deepEqual(next.renderMarkers(), [unpadded(settled)]);
+	assert.deepEqual(next.renderMarkers(), [unpadded(row())]);
 });

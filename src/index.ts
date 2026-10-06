@@ -49,14 +49,25 @@ function prependEditorText(ctx: ExtensionContext, texts: string[]): void {
 	ctx.ui.setEditorText([...texts, current].filter((text) => text.trim()).join("\n\n"));
 }
 
-// Marker timeline in ms after continuation start. Updates are stepped every
-// STEP; the final 2960-3000 interval is kept rather than rounded away.
+// Marker timeline in ms after continuation start. The plate changes on an 80 ms
+// grid (STEP); the ping bars change on a 40 ms grid (FRAME), so the clock redraws
+// every FRAME and two bars can never share a frame.
 const STEP = 80;
-const WIPE = 320;
-const CHEVRON_STEP = 160;
-const SNAP = 2720;
+const FRAME = 40;
+const FLASH_OFF = 80;
+const FLASH_ON = 160;
 const SETTLE_WIPE = 2800;
 const WINDOW = 3000;
+
+// Seven stationary bars in a 16-cell span one cell after the plate. Each bar
+// appears acid every PING_STAGGER from PING_LAUNCH, turns grey in its own cell
+// at GHOST_AT + i * PING_STAGGER, and disappears GHOST_FOR later.
+const BAR_OFFSETS = [0, 1, 3, 5, 8, 11, 15];
+const SPAN = 16;
+const PING_LAUNCH = 160;
+const PING_STAGGER = 40;
+const GHOST_AT = 440;
+const GHOST_FOR = 120;
 
 // Filled plates use the Acid/Black palette. Everything else keeps the terminal's
 // default background, including transparency; Pi handles color-mode conversion.
@@ -67,14 +78,12 @@ const grey = parseColor("#717171");
 const darkGrey = parseColor("#555555");
 const livePlate: ThemeStyle = { fg: black, bg: acid, bold: true };
 const recordPlate: ThemeStyle = { fg: bone, bg: darkGrey, bold: true };
-const track: ThemeStyle = { fg: grey };
-const tick: ThemeStyle = { fg: black, bg: bone, bold: true };
-const rule: ThemeStyle = { fg: darkGrey };
+const ghost: ThemeStyle = { fg: grey, bold: true };
 const blank: ThemeStyle = {};
 
 /**
  * One marker row at `elapsed` ms, or settled when undefined. The label starts
- * at the native outputPad column; the rule ends before the right padding.
+ * at the native outputPad column; the row is clipped to the right padding.
  */
 export function renderMarker(theme: Theme, width: number, outputPad: 0 | 1, elapsed?: number): string {
 	// Acid needs a readable replacement when its background is no longer black.
@@ -82,7 +91,6 @@ export function renderMarker(theme: Theme, width: number, outputPad: 0 | 1, elap
 	const label = `${outputPad ? " " : ""}DIRECTIVE UPDATED `;
 	const plate = label.length;
 	const contentWidth = Math.max(0, width - outputPad);
-	const ruleLength = Math.max(0, contentWidth - (plate + 5));
 	const m = elapsed === undefined ? WINDOW : Math.max(0, elapsed);
 	const runs: [string, ThemeStyle][] = [];
 	const add = (text: string, style: ThemeStyle): void => {
@@ -90,34 +98,25 @@ export function renderMarker(theme: Theme, width: number, outputPad: 0 | 1, elap
 		if (last?.[1] === style) last[0] += text;
 		else runs.push([text, style]);
 	};
-	const addPlate = (split: number, before: ThemeStyle, after: ThemeStyle): void => {
-		add(label.slice(0, split), before);
-		add(label.slice(split), after);
-	};
 
-	const step = Math.floor(m / STEP);
-	if (m >= WINDOW) addPlate(plate, recordPlate, recordPlate);
-	else if (m < SETTLE_WIPE) addPlate(Math.min(plate, Math.ceil(((step + 1) * plate * STEP) / WIPE)), livePlate, outline);
-	else addPlate(Math.min(plate, Math.ceil(((m - SETTLE_WIPE + STEP) * plate) / (WINDOW - SETTLE_WIPE))), recordPlate, livePlate);
+	// Two abrupt whole-plate flashes (on, off, on), then a right-to-left wipe to
+	// the record plate. Unfilled cells keep their letters so the label stays readable.
+	const recorded = m >= WINDOW ? plate
+		: m < SETTLE_WIPE ? 0
+		: Math.min(plate, Math.ceil(((Math.floor(m / STEP) * STEP - SETTLE_WIPE + STEP) * plate) / (WINDOW - SETTLE_WIPE)));
+	const flashed = m >= FLASH_OFF && m < FLASH_ON ? outline : livePlate;
+	add(label.slice(0, plate - recorded), flashed);
+	add(label.slice(plate - recorded), recordPlate);
 	add(" ", blank);
 
-	if (m < SNAP) {
-		// A looping conveyor, never a fill, so it cannot read as progress.
-		const head = Math.floor(m / CHEVRON_STEP) % 3;
-		for (let i = 0; i < 3; i++) {
-			if (i === head) add("▶", outline);
-			else if (i === head - 1) add("›", outline);
-			else add("·", track);
-		}
-	} else {
-		add("✓", m < SETTLE_WIPE ? tick : outline);
-		add("  ", blank);
+	const t = Math.floor(m / FRAME) * FRAME;
+	for (let x = 0; x < SPAN; x++) {
+		const bar = BAR_OFFSETS.indexOf(x);
+		const ghostAt = GHOST_AT + bar * PING_STAGGER;
+		if (bar < 0 || t < PING_LAUNCH + bar * PING_STAGGER || t >= ghostAt + GHOST_FOR) add(" ", blank);
+		else add("│", t < ghostAt ? outline : ghost);
 	}
-	add(" ", blank);
-
-	const shown = m >= WIPE ? ruleLength : Math.min(ruleLength, Math.floor(((step + 1) * ruleLength * STEP) / WIPE) + 1);
-	add("─".repeat(shown), rule);
-	add(" ".repeat(ruleLength - shown), blank);
+	add(" ".repeat(Math.max(0, contentWidth - (plate + 1 + SPAN))), blank);
 
 	const line = runs.filter(([text]) => text).map(([text, style]) => theme.style(text, style)).join("");
 	return truncateToWidth(line, contentWidth, "");
@@ -135,7 +134,7 @@ export function createClaudeInterrupt(pi: ExtensionAPI): void {
 	let animation: {
 		id: string;
 		startedAt: number;
-		/** Stepped animation time; render state is a pure function of it. */
+		/** Frame-stepped animation time; render state is a pure function of it. */
 		elapsed: number;
 		ctx: ExtensionContext;
 		timer?: ReturnType<typeof setTimeout>;
@@ -340,16 +339,16 @@ export function createClaudeInterrupt(pi: ExtensionAPI): void {
 			// redraw/lifecycle access; the single visible row belongs to history.
 			ctx.ui.setWidget(markerType, (tui) => {
 				live.requestRender = () => tui.requestRender();
-				// Each timer advances at least one step and catches up after a late
-				// wake-up, so the animation ends within WINDOW / STEP + 1 timers.
+				// Each timer advances at least one frame and catches up after a late
+				// wake-up, so the animation ends within WINDOW / FRAME timers.
 				const schedule = (): void => {
-					const due = Math.min(WINDOW, live.elapsed + STEP) - (Date.now() - live.startedAt);
-					live.timer = setTimeout(advance, Math.min(STEP, Math.max(0, due)));
+					const due = Math.min(WINDOW, live.elapsed + FRAME) - (Date.now() - live.startedAt);
+					live.timer = setTimeout(advance, Math.min(FRAME, Math.max(0, due)));
 				};
 				const advance = (): void => {
 					if (animation !== live) return;
-					const reached = Math.floor((Date.now() - live.startedAt) / STEP) * STEP;
-					live.elapsed = Math.min(WINDOW, Math.max(live.elapsed + STEP, reached));
+					const reached = Math.floor((Date.now() - live.startedAt) / FRAME) * FRAME;
+					live.elapsed = Math.min(WINDOW, Math.max(live.elapsed + FRAME, reached));
 					if (live.elapsed === WINDOW) {
 						clearAnimation();
 						return;

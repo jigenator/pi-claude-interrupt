@@ -380,18 +380,11 @@ function startContinuation(h: ReturnType<typeof harness>) {
 const mockClock = (t: TestContext) => t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
 // Mock runAll() only reaches timers already queued, so step through the chain.
 function finishAnimation(t: TestContext): void {
-	for (let i = 0; i < 40; i++) t.mock.timers.tick(80);
+	for (let i = 0; i < 75; i++) t.mock.timers.tick(40);
 }
 
-// The label, gap, indicator and gap: the first 24 columns at outputPad 1.
-const live = (indicator: string) => ` DIRECTIVE UPDATED  ${indicator} `;
-const settled = live("✓  ");
-function head(lines: string[] | undefined, pad: 0 | 1 = 1): string {
-	assert.equal(lines?.length, 1, "the marker is always exactly one row");
-	return stripAnsi(lines[0]).slice(0, 23 + pad);
-}
-const lastStep = 37; // 80ms steps 0..2960; the final 40ms interval ends at 3000.
-const indicatorAt = (step: number) => step >= 34 ? "✓  " : ["▶··", "›▶·", "·›▶"][Math.floor(step / 2) % 3];
+const lastFrame = 74; // 40ms frames 0..2960; the animation settles at exactly 3000.
+const frames = Array.from({ length: lastFrame + 2 }, (_, frame) => frame * 40); // 0..3000
 
 type Cell = { ch: string; fg?: string; bg?: string; bold: boolean };
 
@@ -433,82 +426,191 @@ const palettes = {
 	"256color": { acid: "@154", black: "@16", bone: "@231", grey: "@242", darkGrey: "@240" },
 } as const;
 
-/** L live plate, O acid ink, R grey record plate, T grey track, K bone tick, U rule, B default-background blank. */
-function classes(line: string, mode: TerminalColorMode): string {
+/**
+ * L acid plate, O acid ink on the terminal background (unfilled plate letters or
+ * a live bar), R grey record plate, G grey ghost bar, B default-background blank.
+ */
+function classes(line: string, mode: TerminalColorMode, ink: string = palettes[mode].acid): string {
 	const c = palettes[mode];
 	return cells(line).map(({ ch, fg, bg, bold }) => {
 		const key = `${fg}/${bg}/${bold}`;
 		if (key === `${c.black}/${c.acid}/true`) return "L";
-		if (key === `${c.acid}/undefined/true`) return "O";
+		if (key === `${ink}/undefined/true`) return "O";
 		if (key === `${c.bone}/${c.darkGrey}/true`) return "R";
-		if (key === `${c.grey}/undefined/false`) return "T";
-		if (key === `${c.black}/${c.bone}/true`) return "K";
-		if (key === `${c.darkGrey}/undefined/false`) return "U";
+		if (key === `${c.grey}/undefined/true`) return "G";
 		if (ch === " " && fg === undefined && bg === undefined && !bold) return "B";
 		return "?";
 	}).join("");
 }
 
-test("marker cells carry the approved Acid/Black colors and attributes in every phase", () => {
-	const r = (n: number, ch: string) => ch.repeat(n);
-	// Width 30 at outputPad 1: 19-cell plate, gap, 3 indicator cells, gap, 5-cell rule, right pad.
-	const frames: [number | undefined, string, string][] = [
-		[0, " DIRECTIVE UPDATED  ▶·· ──   ", `${r(5, "L")}${r(14, "O")}BOTTBUUBBB`],
-		[80, " DIRECTIVE UPDATED  ▶·· ───  ", `${r(10, "L")}${r(9, "O")}BOTTBUUUBB`],
-		[160, " DIRECTIVE UPDATED  ›▶· ──── ", `${r(15, "L")}${r(4, "O")}BOOTBUUUUB`],
-		[240, " DIRECTIVE UPDATED  ›▶· ─────", `${r(19, "L")}BOOTBUUUUU`],
-		[320, " DIRECTIVE UPDATED  ·›▶ ─────", `${r(19, "L")}BTOOBUUUUU`],
-		[2640, " DIRECTIVE UPDATED  ›▶· ─────", `${r(19, "L")}BOOTBUUUUU`],
-		[2720, " DIRECTIVE UPDATED  ✓   ─────", `${r(19, "L")}BKBBBUUUUU`],
-		[2800, " DIRECTIVE UPDATED  ✓   ─────", `${r(8, "R")}${r(11, "L")}BOBBBUUUUU`],
-		[2880, " DIRECTIVE UPDATED  ✓   ─────", `${r(16, "R")}${r(3, "L")}BOBBBUUUUU`],
-		[2960, " DIRECTIVE UPDATED  ✓   ─────", `${r(19, "R")}BOBBBUUUUU`],
-		[3000, " DIRECTIVE UPDATED  ✓   ─────", `${r(19, "R")}BOBBBUUUUU`],
-		[undefined, " DIRECTIVE UPDATED  ✓   ─────", `${r(19, "R")}BOBBBUUUUU`],
+// An oracle written from the approved timeline, not from the renderer: plate
+// flashes at 0/80/160, grey wipe cells at 2800/2880/2960, seven fixed bars.
+const barCells = [0, 1, 3, 5, 8, 11, 15];
+const greyCells = { 2800: { 0: 8, 1: 8 }, 2880: { 0: 15, 1: 16 }, 2960: { 0: 18, 1: 19 } } as const;
+
+function expectedRow(elapsed: number | undefined, pad: 0 | 1, width: number): { glyphs: string; classes: string } {
+	const label = `${pad ? " " : ""}DIRECTIVE UPDATED `;
+	const m = elapsed ?? 3000;
+	const grey = m >= 3000 ? label.length : m < 2800 ? 0 : greyCells[(Math.floor(m / 80) * 80) as 2800 | 2880 | 2960][pad];
+	const filled = m < 80 || m >= 160 ? "L" : "O";
+	const span = Array.from({ length: 16 }, () => ({ glyph: " ", cls: "B" }));
+	const frame = Math.floor(m / 40) * 40;
+	barCells.forEach((cell, bar) => {
+		if (frame >= 160 + 40 * bar && frame < 440 + 40 * bar) span[cell] = { glyph: "│", cls: "O" };
+		else if (frame >= 440 + 40 * bar && frame < 560 + 40 * bar) span[cell] = { glyph: "│", cls: "G" };
+	});
+	const rest = Math.max(0, Math.max(0, width - pad) - (label.length + 1 + 16));
+	const clip = (text: string) => Array.from(text).slice(0, Math.max(0, width - pad)).join("");
+	return {
+		glyphs: clip(`${label} ${span.map(({ glyph }) => glyph).join("")}${" ".repeat(rest)}`),
+		classes: clip(`${filled.repeat(label.length - grey)}${"R".repeat(grey)}B${span.map(({ cls }) => cls).join("")}${"B".repeat(rest)}`),
+	};
+}
+
+function assertRow(lines: string[] | undefined, elapsed: number | undefined, pad: 0 | 1 = 1, width = 80, mode: TerminalColorMode = "truecolor", message = ""): void {
+	assert.equal(lines?.length, 1, "the marker is always exactly one row");
+	const expected = expectedRow(elapsed, pad, width);
+	assert.equal(stripAnsi(lines[0]), expected.glyphs, `${message} glyphs at ${elapsed}`);
+	assert.equal(classes(lines[0], mode), expected.classes, `${message} cells at ${elapsed}`);
+}
+
+test("marker cells carry the approved Acid/Black colors and attributes at every ping, flash and wipe boundary", () => {
+	const plate = (n: number, ch: string) => ch.repeat(n);
+	// Width 40 at outputPad 1: 19-cell plate, one gap, the 16-cell bar span, then three blank cells.
+	// Each span string lists the cells of offsets [0,1,3,5,8,11,15]; O live acid bar, G grey ghost, B blank.
+	const span: [number, string][] = [
+		[160, "OBBBBBBBBBBBBBBB"], [200, "OOBBBBBBBBBBBBBB"], [240, "OOBOBBBBBBBBBBBB"], [280, "OOBOBOBBBBBBBBBB"],
+		[320, "OOBOBOBBOBBBBBBB"], [360, "OOBOBOBBOBBOBBBB"], [400, "OOBOBOBBOBBOBBBO"],
+		[440, "GOBOBOBBOBBOBBBO"], [480, "GGBOBOBBOBBOBBBO"], [520, "GGBGBOBBOBBOBBBO"], [560, "BGBGBGBBOBBOBBBO"],
+		[600, "BBBGBGBBGBBOBBBO"], [640, "BBBBBGBBGBBGBBBO"], [680, "BBBBBBBBGBBGBBBG"], [720, "BBBBBBBBBBBGBBBG"],
+		[760, "BBBBBBBBBBBBBBBG"], [800, "BBBBBBBBBBBBBBBB"], [2000, "BBBBBBBBBBBBBBBB"],
+	];
+	const glyph = (cells: string) => Array.from(cells, (c) => (c === "B" ? " " : "│")).join("");
+	const literal: [number | undefined, string, string][] = [
+		[0, " DIRECTIVE UPDATED ".padEnd(36 + 3), `${plate(19, "L")}${plate(20, "B")}`],
+		[40, " DIRECTIVE UPDATED ".padEnd(36 + 3), `${plate(19, "L")}${plate(20, "B")}`],
+		[79, " DIRECTIVE UPDATED ".padEnd(36 + 3), `${plate(19, "L")}${plate(20, "B")}`],
+		[80, " DIRECTIVE UPDATED ".padEnd(36 + 3), `${plate(19, "O")}${plate(20, "B")}`],
+		[120, " DIRECTIVE UPDATED ".padEnd(36 + 3), `${plate(19, "O")}${plate(20, "B")}`],
+		[159, " DIRECTIVE UPDATED ".padEnd(36 + 3), `${plate(19, "O")}${plate(20, "B")}`],
+		...span.map(([at, cells]): [number, string, string] => [at, ` DIRECTIVE UPDATED  ${glyph(cells)}   `, `${plate(19, "L")}B${cells}BBB`]),
+		[2799, " DIRECTIVE UPDATED ".padEnd(36 + 3), `${plate(19, "L")}${plate(20, "B")}`],
+		[2800, " DIRECTIVE UPDATED ".padEnd(36 + 3), `${plate(11, "L")}${plate(8, "R")}${plate(20, "B")}`],
+		[2840, " DIRECTIVE UPDATED ".padEnd(36 + 3), `${plate(11, "L")}${plate(8, "R")}${plate(20, "B")}`],
+		[2880, " DIRECTIVE UPDATED ".padEnd(36 + 3), `${plate(3, "L")}${plate(16, "R")}${plate(20, "B")}`],
+		[2920, " DIRECTIVE UPDATED ".padEnd(36 + 3), `${plate(3, "L")}${plate(16, "R")}${plate(20, "B")}`],
+		[2960, " DIRECTIVE UPDATED ".padEnd(36 + 3), `${plate(19, "R")}${plate(20, "B")}`],
+		[2999, " DIRECTIVE UPDATED ".padEnd(36 + 3), `${plate(19, "R")}${plate(20, "B")}`],
+		[3000, " DIRECTIVE UPDATED ".padEnd(36 + 3), `${plate(19, "R")}${plate(20, "B")}`],
+		[undefined, " DIRECTIVE UPDATED ".padEnd(36 + 3), `${plate(19, "R")}${plate(20, "B")}`],
 	];
 	for (const mode of ["truecolor", "256color"] as const) {
-		for (const [elapsed, glyphs, expected] of frames) {
-			const line = renderMarker(makeTheme(mode), 30, 1, elapsed);
+		for (const [elapsed, glyphs, expected] of literal) {
+			const line = renderMarker(makeTheme(mode), 40, 1, elapsed);
 			assert.equal(stripAnsi(line), glyphs, `${mode} ${elapsed}`);
 			assert.equal(classes(line, mode), expected, `${mode} ${elapsed}`);
-			// Only plates/flash have backgrounds. Transparent acid ink follows the
-			// native accent on light themes; the plate colors and glyphs stay fixed.
+			// Transparent acid ink follows the native accent on light themes; filled
+			// plates, grey ghosts and the record plate stay fixed.
 			const light = makeTheme(mode, "light");
 			const accent = cells(light.style("x", { fg: "accent", bold: true }))[0].fg;
-			assert.deepEqual(cells(renderMarker(light, 30, 1, elapsed)), cells(line).map((cell) => ({
+			assert.deepEqual(cells(renderMarker(light, 40, 1, elapsed)), cells(line).map((cell) => ({
 				...cell, fg: cell.fg === palettes[mode].acid && cell.bg === undefined ? accent : cell.fg,
 			})));
 		}
 	}
-	// outputPad 0 drops the leading plate cell so the label stays on column 0.
-	const flush = renderMarker(makeTheme("truecolor"), 30, 0, 0);
-	assert.equal(stripAnsi(flush), "DIRECTIVE UPDATED  ▶·· ──     ");
-	assert.equal(classes(flush, "truecolor"), `${r(5, "L")}${r(13, "O")}BOTTBUUBBBBB`);
-	assert.equal(classes(renderMarker(makeTheme("truecolor"), 30, 0, 2800), "truecolor"), `${r(8, "R")}${r(10, "L")}BOBBBUUUUUUU`);
+	// outputPad 0 keeps the label on column 0: an 18-cell plate with the same proportional wipe.
+	const flush = (elapsed: number) => renderMarker(makeTheme("truecolor"), 40, 0, elapsed);
+	assert.equal(stripAnsi(flush(160)), "DIRECTIVE UPDATED  │" + " ".repeat(20));
+	assert.equal(classes(flush(160), "truecolor"), `${plate(18, "L")}BO${plate(20, "B")}`);
+	assert.equal(classes(flush(80), "truecolor"), `${plate(18, "O")}${plate(22, "B")}`);
+	assert.equal(classes(flush(2800), "truecolor"), `${plate(10, "L")}${plate(8, "R")}${plate(22, "B")}`);
+	assert.equal(classes(flush(2880), "truecolor"), `${plate(3, "L")}${plate(15, "R")}${plate(22, "B")}`);
+	assert.equal(classes(flush(2960), "truecolor"), `${plate(18, "R")}${plate(22, "B")}`);
 });
 
-test("marker rows fit every width from 0 to 160 in every frame, pad and color mode", () => {
-	const times = [...Array.from({ length: lastStep + 1 }, (_, step) => step * 80), 3000, undefined];
+test("every 40ms frame matches the approved timeline in both pads, color modes and light themes", () => {
 	for (const mode of ["truecolor", "256color"] as const) {
-		const theme = makeTheme(mode);
-		for (const pad of [0, 1] as const) {
-			for (let width = 0; width <= 160; width++) {
-				for (const elapsed of times) {
-					const line = renderMarker(theme, width, pad, elapsed);
-					// Narrow rows are clipped; wider rows run the rule to the right padding.
-					assert.equal(visibleWidth(line), Math.max(0, width - pad), `${mode} pad ${pad} width ${width} at ${elapsed}`);
-					assert.equal(renderMarker(theme, width, pad, elapsed), line, "rendering is stateless");
+		for (const appearance of ["dark", "light"] as const) {
+			const theme = makeTheme(mode, appearance);
+			// Light themes replace only transparent acid ink with Pi's accent color.
+			const ink = appearance === "light" ? cells(theme.style("x", { fg: "accent", bold: true }))[0].fg! : palettes[mode].acid;
+			for (const pad of [0, 1] as const) {
+				for (const elapsed of [...frames, undefined]) {
+					const line = renderMarker(theme, 80, pad, elapsed);
+					const expected = expectedRow(elapsed, pad, 80);
+					assert.equal(stripAnsi(line), expected.glyphs, `${mode} ${appearance} pad ${pad} ${elapsed}`);
+					assert.equal(classes(line, mode, ink), expected.classes, `${mode} ${appearance} pad ${pad} ${elapsed}`);
 				}
 			}
 		}
 	}
 });
 
+test("each 40ms frame introduces at most one bar, one grey turn and one removal; the plate stays on its 80ms grid", () => {
+	const theme = makeTheme("truecolor");
+	const row = (elapsed: number) => classes(renderMarker(theme, 80, 1, elapsed), "truecolor");
+	const barCols = barCells.map((cell) => 20 + cell);
+	const plateOf = (elapsed: number) => row(elapsed).slice(0, 19);
+	let appearances = 0;
+	for (let elapsed = 40; elapsed <= 3000; elapsed += 40) {
+		const before = row(elapsed - 40);
+		const after = row(elapsed);
+		const changes = barCols.map((col) => `${before[col]}${after[col]}`);
+		const count = (change: string) => changes.filter((value) => value === change).length;
+		// Only O→G (grey turn), B→O (new bar) and G→B (removal) are legal bar changes.
+		assert.ok(changes.every((change) => ["BB", "OO", "GG", "BO", "OG", "GB"].includes(change)), `${elapsed}: ${changes}`);
+		assert.equal(count("BO"), elapsed >= 160 && elapsed <= 400 ? 1 : 0, `new bar at ${elapsed}`);
+		assert.equal(count("OG"), elapsed >= 440 && elapsed <= 680 ? 1 : 0, `grey turn at ${elapsed}`);
+		assert.equal(count("GB"), elapsed >= 560 && elapsed <= 800 ? 1 : 0, `removal at ${elapsed}`);
+		appearances += count("BO");
+		// The plate only moves on 80ms boundaries: odd 40ms frames equal the previous even frame.
+		if (elapsed % 80 === 40) assert.equal(plateOf(elapsed), plateOf(elapsed - 40), `plate at ${elapsed}`);
+	}
+	assert.equal(appearances, 7);
+	assert.equal(row(800).slice(19), row(2000).slice(19), "all ghosts are gone at 800ms");
+	assert.ok(!row(800).includes("O") && !row(800).includes("G"));
+});
+
+test("rendering quantizes ping to 40ms and the plate to 80ms at every millisecond", () => {
+	const theme = makeTheme("truecolor");
+	for (const pad of [0, 1] as const) {
+		for (let elapsed = 0; elapsed <= 3100; elapsed++) {
+			const line = renderMarker(theme, 80, pad, elapsed);
+			assert.equal(line, renderMarker(theme, 80, pad, Math.floor(elapsed / 40) * 40), `pad ${pad} ${elapsed}`);
+			assert.equal(classes(line, "truecolor"), expectedRow(elapsed, pad, 80).classes, `pad ${pad} ${elapsed}`);
+		}
+	}
+	assert.equal(renderMarker(theme, 80, 1, -50), renderMarker(theme, 80, 1, 0), "negative time clamps to the start");
+});
+
+test("marker rows fit every width from 0 to 160 in every frame, pad and color mode, clipping instead of reflowing", () => {
+	for (const mode of ["truecolor", "256color"] as const) {
+		const theme = makeTheme(mode);
+		for (const pad of [0, 1] as const) {
+			for (const elapsed of [...frames, undefined]) {
+				const wide = expectedRow(elapsed, pad, 160);
+				for (let width = 0; width <= 160; width++) {
+					const line = renderMarker(theme, width, pad, elapsed);
+					// A 16-cell span independent of terminal width: narrow rows are exact prefixes.
+					assert.equal(visibleWidth(line), Math.max(0, width - pad), `${mode} pad ${pad} width ${width} at ${elapsed}`);
+					assert.equal(stripAnsi(line), wide.glyphs.slice(0, Math.max(0, width - pad)), `${mode} pad ${pad} width ${width} at ${elapsed}`);
+					assert.equal(renderMarker(theme, width, pad, elapsed), line, "rendering is stateless");
+					if (width % 7 === 0 || width < 40) assert.equal(classes(line, mode), wide.classes.slice(0, Math.max(0, width - pad)), `${mode} pad ${pad} width ${width} at ${elapsed}`);
+				}
+			}
+		}
+	}
+	// The span is 16 cells wide: bars never extend past column plate + 1 + 16.
+	const widest = stripAnsi(renderMarker(makeTheme("truecolor"), 160, 1, 400));
+	assert.equal(widest.slice(36).trim(), "");
+	assert.equal(widest.slice(20, 36), "││ │ │  │  │   │");
+});
+
 test("marker label starts on the same column as Pi's native abort notice for outputPad 0/1", () => {
 	const theme = makeTheme("truecolor");
 	for (const pad of [0, 1] as const) {
 		const native = stripAnsi(new Text(theme.fg("error", "Operation aborted"), pad, 0).render(80)[0]);
-		for (const elapsed of [0, 1000, 2800, undefined]) {
+		for (const elapsed of [0, 100, 1000, 2800, undefined]) {
 			const marker = stripAnsi(renderMarker(theme, 80, pad, elapsed));
 			assert.equal(marker.indexOf("D"), native.indexOf("O"));
 			assert.equal(visibleWidth(marker), 80 - pad, "native right padding stays unstyled");
@@ -516,29 +618,29 @@ test("marker label starts on the same column as Pi's native abort notice for out
 	}
 });
 
-test("history marker steps every 80ms through 38 frames and settles at exactly 3000ms without changing the draft", (t) => {
+test("history marker redraws every 40ms through 75 frames and settles at exactly 3000ms without changing the draft", (t) => {
 	mockClock(t);
 	const h = harness(t);
 	h.setDraft("keep my cursor text");
 	startContinuation(h);
 	assert.equal(h.markers.length, 1);
-	for (let step = 0; step <= lastStep; step++) {
-		assert.equal(head(h.renderMarker()), live(indicatorAt(step)), `step ${step}`);
+	for (let frame = 0; frame <= lastFrame; frame++) {
+		const elapsed = frame * 40;
+		assertRow(h.renderMarker(), elapsed, 1, 80, "truecolor", `frame ${frame}`);
 		assert.deepEqual(h.renderWidget(), []); // No second visible copy.
 		for (const width of [0, 1, 3, 12, 25, 80, 160]) {
 			const lines = h.renderMarker(0, width)!;
 			assert.equal(lines.length, 1);
 			assert.ok(visibleWidth(lines[0]) <= width);
 		}
-		const interval = step === lastStep ? 40 : 80;
-		t.mock.timers.tick(interval - 1);
-		assert.equal(head(h.renderMarker()), live(indicatorAt(step)));
-		assert.equal(h.renderRequests, step);
+		t.mock.timers.tick(39);
+		assertRow(h.renderMarker(), elapsed, 1, 80, "truecolor", `frame ${frame} before its boundary`);
+		assert.equal(h.renderRequests, frame);
 		t.mock.timers.tick(1);
-		assert.equal(h.renderRequests, step + 1);
+		assert.equal(h.renderRequests, frame + 1);
 	}
 	assert.equal(Date.now(), 3000);
-	assert.equal(head(h.renderMarker()), settled);
+	assertRow(h.renderMarker(), undefined);
 	assert.equal(h.renderWidget(), undefined);
 	assert.equal(h.widgetShows, 1);
 	h.emit("message_start", userMessageStart);
@@ -546,9 +648,9 @@ test("history marker steps every 80ms through 38 frames and settles at exactly 3
 	h.emit("agent_start", { type: "agent_start" });
 	t.mock.timers.tick(60_000);
 	t.mock.timers.runAll();
-	assert.equal(h.renderRequests, 38);
+	assert.equal(h.renderRequests, 75);
 	assert.equal(h.markers.length, 1);
-	assert.equal(head(h.renderMarker()), settled);
+	assertRow(h.renderMarker(), undefined);
 	assert.equal(h.draft, "keep my cursor text");
 });
 
@@ -556,19 +658,23 @@ test("theme, color-mode and width changes during the animation keep the current 
 	mockClock(t);
 	const h = harness(t);
 	startContinuation(h);
-	for (let i = 0; i < 3; i++) t.mock.timers.tick(80);
+	for (let i = 0; i < 6; i++) t.mock.timers.tick(40); // 240ms: bars at cells 0, 1 and 3 are live.
 	const before = h.renderRequests;
 	for (const width of [80, 20, 0, 160, 37, 80]) assert.ok(visibleWidth(h.renderMarker(0, width)![0]) <= width);
 	h.setTheme(makeTheme("256color", "dark"));
-	const line = h.renderMarker()![0];
-	assert.equal(head([line]), live("›▶·"));
-	assert.equal(classes(line, "256color").slice(0, 24), `${"L".repeat(19)}BOOTB`);
+	assertRow(h.renderMarker(), 240, 1, 80, "256color");
 	h.setTheme(makeTheme("truecolor", "light"));
-	assert.equal(head(h.renderMarker()), live("›▶·"));
-	assert.deepEqual(cells(h.renderMarker()![0])[20], { ch: "›", fg: "#202020", bg: undefined, bold: true });
-	assert.equal(h.renderRequests, before, "rendering never schedules work");
+	assert.equal(stripAnsi(h.renderMarker()![0]).slice(0, 36), " DIRECTIVE UPDATED  ││ │            ");
+	assert.deepEqual(cells(h.renderMarker()![0])[20], { ch: "│", fg: "#202020", bg: undefined, bold: true });
+	assert.deepEqual(cells(h.renderMarker()![0])[0], { ch: " ", fg: "#000000", bg: "#c0fe04", bold: true }, "the filled plate keeps its Acid/Black colors");
+	for (let i = 0; i < 6; i++) t.mock.timers.tick(40); // 480ms: bars 0 and 1 are grey ghosts.
+	assert.deepEqual(cells(h.renderMarker()![0]).slice(20, 22), [
+		{ ch: "│", fg: "#717171", bg: undefined, bold: true },
+		{ ch: "│", fg: "#717171", bg: undefined, bold: true },
+	], "light themes only replace transparent acid ink; ghosts stay grey");
+	assert.equal(h.renderRequests, before + 6);
 	finishAnimation(t);
-	assert.equal(head(h.renderMarker()), settled);
+	assertRow(h.renderMarker(), undefined, 1, 80, "truecolor", "settled");
 });
 
 test("late timer wake-ups catch up and wall-clock jumps cannot extend the bounded animation", (t) => {
@@ -583,27 +689,38 @@ test("late timer wake-ups catch up and wall-clock jumps cannot extend the bounde
 	const h = harness(t);
 	startContinuation(h);
 	wall += 1000; // An event-loop stall: time passes before the first timer runs.
-	tick(80);
+	tick(40);
 	assert.equal(h.renderRequests, 1, "one redraw, not a burst of missed frames");
-	assert.equal(head(h.renderMarker()), live("▶··")); // 1040ms: conveyor step 13.
+	assertRow(h.renderMarker(), 1040); // Ping is long gone; the plate is filled.
 	wall += 5000;
-	tick(40); // Next boundary was 1120ms.
+	tick(40); // Next boundary was 1080ms.
 	assert.equal(h.renderWidget(), undefined);
-	assert.equal(head(h.renderMarker()), settled);
+	assertRow(h.renderMarker(), undefined);
 	assert.equal(h.renderRequests, 2);
 
 	h.emit("session_start", { type: "session_start" });
 	startContinuation(h);
-	wall -= 10_000; // A backwards wall-clock jump still advances one step per timer.
+	wall -= 10_000; // A backwards wall-clock jump still advances one frame per timer.
 	let timers = 0;
-	while (h.renderWidget() !== undefined && timers < 100) {
-		tick(80);
+	while (h.renderWidget() !== undefined && timers < 200) {
+		tick(40);
 		timers++;
 	}
-	assert.equal(timers, 38);
-	assert.equal(head(h.renderMarker()), settled);
+	assert.equal(timers, 75);
+	assertRow(h.renderMarker(), undefined);
 	t.mock.timers.runAll();
-	assert.equal(h.renderRequests, 2 + 38);
+	assert.equal(h.renderRequests, 2 + 75);
+
+	// A stall inside the ping catches up to the current 40ms frame in a single redraw.
+	h.emit("session_start", { type: "session_start" });
+	startContinuation(h);
+	wall += 330;
+	tick(40); // Wall time is now 370ms: frame 360.
+	assert.equal(h.renderRequests, 2 + 75 + 1);
+	assertRow(h.renderMarker(), 360);
+	tick(30); // The follow-up timer lands on the 400ms boundary.
+	assert.equal(h.renderRequests, 2 + 75 + 2);
+	assertRow(h.renderMarker(), 400);
 });
 
 test("marker waits for confirmed continuation and stays out of ordinary, native and non-TUI paths", (t) => {
@@ -641,24 +758,23 @@ test("saved markers reload completed and distinct identities never animate old e
 	const saved = structuredClone(first.markers[0].entry);
 	const h = harness(t);
 	h.loadEntry(saved);
-	assert.equal(head(h.renderMarker()), settled);
+	assertRow(h.renderMarker(), undefined);
 	assert.equal(h.widgetShows, 0);
 	startContinuation(h);
 	assert.notDeepEqual(h.markers[0].entry.data, h.markers[1].entry.data);
-	assert.equal(head(h.renderMarker(0)), settled);
-	t.mock.timers.tick(80);
-	t.mock.timers.tick(80);
-	assert.equal(head(h.renderMarker(1)), live("›▶·"));
+	assertRow(h.renderMarker(0), undefined);
+	for (let i = 0; i < 4; i++) t.mock.timers.tick(40);
+	assertRow(h.renderMarker(1), 160);
 	startContinuation(h);
 	assert.equal(new Set(h.markers.map(({ entry }) => (entry.data as { id: string }).id)).size, 3);
-	assert.equal(head(h.renderMarker(0)), settled);
-	assert.equal(head(h.renderMarker(1)), settled);
-	assert.equal(head(h.renderMarker(2)), live("▶··"));
-	t.mock.timers.tick(80);
-	assert.equal(h.renderRequests, 4); // Two old frames, their finalization, one new frame.
+	assertRow(h.renderMarker(0), undefined);
+	assertRow(h.renderMarker(1), undefined);
+	assertRow(h.renderMarker(2), 0);
+	t.mock.timers.tick(40);
+	assert.equal(h.renderRequests, 6); // Four old frames, their finalization, one new frame.
 	finishAnimation(t);
-	assert.equal(h.renderRequests, 3 + 38);
-	assert.equal(head(h.renderMarker(2)), settled);
+	assert.equal(h.renderRequests, 5 + 75);
+	assertRow(h.renderMarker(2), undefined);
 });
 
 test("Escape, widget disposal and session cleanup finalize history and cancel every timer", (t) => {
@@ -672,12 +788,13 @@ test("Escape, widget disposal and session cleanup finalize history and cancel ev
 	]) {
 		h.emit("session_start", { type: "session_start" });
 		startContinuation(h);
-		t.mock.timers.tick(80);
+		for (let i = 0; i < 9; i++) t.mock.timers.tick(40); // 360ms: mid-ping, with bars live.
+		assertRow(h.renderMarker(), 360);
 		cleanup();
 		const renders: number = h.renderRequests;
 		t.mock.timers.runAll();
 		assert.equal(h.renderWidget(), undefined);
-		assert.equal(head(h.renderMarker()), settled);
+		assertRow(h.renderMarker(), undefined);
 		assert.equal(h.renderRequests, renders);
 	}
 });
@@ -703,7 +820,7 @@ test("Escape release and repeat during preflight cannot trigger failed-start rec
 	assert.equal(h.markers.length, 1, "release must not abandon continuation tracking");
 });
 
-test("Escape release and repeat leave all 38 animation frames live until exactly 3000ms", (t) => {
+test("Escape release and repeat leave all 75 animation frames live until exactly 3000ms", (t) => {
 	mockClock(t);
 	const h = harness(t);
 	h.input("continue", "steer");
@@ -711,19 +828,18 @@ test("Escape release and repeat leave all 38 animation frames live until exactly
 	h.escape(escapePress);
 	h.emit("agent_settled", { type: "agent_settled" });
 	h.emit("agent_start", { type: "agent_start" });
-	for (let step = 0; step <= lastStep; step++) {
-		h.escape(step % 2 ? escapeRepeat : escapeRelease);
+	for (let frame = 0; frame <= lastFrame; frame++) {
+		h.escape(frame % 2 ? escapeRepeat : escapeRelease);
 		assert.deepEqual(h.renderWidget(), [], "release/repeat must not finalize the live marker");
-		assert.equal(head(h.renderMarker()), live(indicatorAt(step)), "release/repeat must not reset the clock");
-		assert.equal(h.renderRequests, step, "release/repeat must not redraw");
-		const interval = step === lastStep ? 40 : 80;
-		t.mock.timers.tick(interval - 1);
+		assertRow(h.renderMarker(), frame * 40, 1, 80, "truecolor", "release/repeat must not reset the clock");
+		assert.equal(h.renderRequests, frame, "release/repeat must not redraw");
+		t.mock.timers.tick(39);
 		assert.deepEqual(h.renderWidget(), []);
 		t.mock.timers.tick(1);
 	}
 	assert.equal(Date.now(), 3000);
 	assert.equal(h.renderWidget(), undefined);
-	assert.equal(h.renderRequests, 38);
+	assert.equal(h.renderRequests, 75);
 	assert.equal(h.markers.length, 1);
 	assert.equal(h.aborts, 1);
 });
@@ -743,7 +859,7 @@ test("extension-owned repeats cannot abort preflight or a live no-queue continua
 	h.escape(escapeRelease);
 	assert.equal(h.escape(escapePress), undefined, "new no-queue press remains native");
 	assert.equal(h.renderWidget(), undefined, "intentional press still ends the animation");
-	assert.equal(head(h.renderMarker()), settled);
+	assertRow(h.renderMarker(), undefined);
 	assert.equal(h.escape(escapeRepeat), undefined, "native-owned repeats remain native");
 });
 
@@ -780,15 +896,18 @@ test("live marker follows outputPad 0/1/default and keeps a stable single-line w
 	for (const pad of [0, 1, undefined] as const) {
 		h.setOutputPad(pad);
 		const shift = pad === 0 ? 0 : 1;
-		const prefix = pad === 0 ? "" : " ";
-		assert.equal(head(h.renderMarker(), shift), `${prefix}DIRECTIVE UPDATED  ▶·· `);
+		assertRow(h.renderMarker(), 0, shift, 80, "truecolor", `pad ${pad}`);
 		assert.equal(visibleWidth(h.renderMarker()![0]), 80 - shift);
-		for (const width of [0, 1, 2, 19, 20, 21, 24, 25]) {
+		for (let i = 0; i < 10; i++) t.mock.timers.tick(40); // 400ms: all seven bars are live.
+		assertRow(h.renderMarker(), 400, shift, 80, "truecolor", `pad ${pad}`);
+		// The bars follow the label: one gap after the 18- or 19-cell plate.
+		assert.equal(stripAnsi(h.renderMarker()![0]).slice(18 + shift, 35 + shift), " ││ │ │  │  │   │");
+		for (const width of [0, 1, 2, 19, 20, 21, 24, 25, 36, 37, 38]) {
 			assert.equal(h.renderMarker(0, width)!.length, 1);
 			assert.ok(visibleWidth(h.renderMarker(0, width)![0]) <= width);
 		}
 		finishAnimation(t);
-		assert.equal(head(h.renderMarker(), shift), `${prefix}DIRECTIVE UPDATED  ✓   `);
+		assertRow(h.renderMarker(), undefined, shift, 80, "truecolor", `pad ${pad}`);
 		assert.equal(visibleWidth(h.renderMarker()![0]), 80 - shift);
 		startContinuation(h);
 	}
