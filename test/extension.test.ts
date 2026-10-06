@@ -455,9 +455,10 @@ function expectedRow(elapsed: number | undefined, pad: 0 | 1, width: number): { 
 	const filled = m < 80 || m >= 160 ? "L" : "O";
 	const span = Array.from({ length: 16 }, () => ({ glyph: " ", cls: "B" }));
 	const frame = Math.floor(m / 40) * 40;
-	barCells.forEach((cell, bar) => {
-		if (frame >= 160 + 40 * bar && frame < 440 + 40 * bar) span[cell] = { glyph: "│", cls: "O" };
-		else if (frame >= 440 + 40 * bar && frame < 560 + 40 * bar) span[cell] = { glyph: "│", cls: "G" };
+	for (const launch of [160, 880]) barCells.forEach((cell, bar) => {
+		const on = launch + 40 * bar;
+		if (frame >= on && frame < on + 280) span[cell] = { glyph: "│", cls: "O" };
+		else if (frame >= on + 280 && frame < on + 400) span[cell] = { glyph: "│", cls: "G" };
 	});
 	const rest = Math.max(0, Math.max(0, width - pad) - (label.length + 1 + 16));
 	const clip = (text: string) => Array.from(text).slice(0, Math.max(0, width - pad)).join("");
@@ -493,7 +494,8 @@ test("marker cells carry the approved Acid/Black colors and attributes at every 
 		[80, " DIRECTIVE UPDATED ".padEnd(36 + 3), `${plate(19, "O")}${plate(20, "B")}`],
 		[120, " DIRECTIVE UPDATED ".padEnd(36 + 3), `${plate(19, "O")}${plate(20, "B")}`],
 		[159, " DIRECTIVE UPDATED ".padEnd(36 + 3), `${plate(19, "O")}${plate(20, "B")}`],
-		...span.map(([at, cells]): [number, string, string] => [at, ` DIRECTIVE UPDATED  ${glyph(cells)}   `, `${plate(19, "L")}B${cells}BBB`]),
+		...[...span, ...span.filter(([at]) => at <= 800).map(([at, cells]): [number, string] => [at + 720, cells])]
+			.map(([at, cells]): [number, string, string] => [at, ` DIRECTIVE UPDATED  ${glyph(cells)}   `, `${plate(19, "L")}B${cells}BBB`]),
 		[2799, " DIRECTIVE UPDATED ".padEnd(36 + 3), `${plate(19, "L")}${plate(20, "B")}`],
 		[2800, " DIRECTIVE UPDATED ".padEnd(36 + 3), `${plate(11, "L")}${plate(8, "R")}${plate(20, "B")}`],
 		[2840, " DIRECTIVE UPDATED ".padEnd(36 + 3), `${plate(11, "L")}${plate(8, "R")}${plate(20, "B")}`],
@@ -546,7 +548,7 @@ test("every 40ms frame matches the approved timeline in both pads, color modes a
 	}
 });
 
-test("each 40ms frame introduces at most one bar, one grey turn and one removal; the plate stays on its 80ms grid", () => {
+test("exactly two pings have an 80ms gap and individual 40ms transitions; the plate stays on its 80ms grid", () => {
 	const theme = makeTheme("truecolor");
 	const row = (elapsed: number) => classes(renderMarker(theme, 80, 1, elapsed), "truecolor");
 	const barCols = barCells.map((cell) => 20 + cell);
@@ -559,16 +561,17 @@ test("each 40ms frame introduces at most one bar, one grey turn and one removal;
 		const count = (change: string) => changes.filter((value) => value === change).length;
 		// Only O→G (grey turn), B→O (new bar) and G→B (removal) are legal bar changes.
 		assert.ok(changes.every((change) => ["BB", "OO", "GG", "BO", "OG", "GB"].includes(change)), `${elapsed}: ${changes}`);
-		assert.equal(count("BO"), elapsed >= 160 && elapsed <= 400 ? 1 : 0, `new bar at ${elapsed}`);
-		assert.equal(count("OG"), elapsed >= 440 && elapsed <= 680 ? 1 : 0, `grey turn at ${elapsed}`);
-		assert.equal(count("GB"), elapsed >= 560 && elapsed <= 800 ? 1 : 0, `removal at ${elapsed}`);
+		assert.equal(count("BO"), (elapsed >= 160 && elapsed <= 400) || (elapsed >= 880 && elapsed <= 1120) ? 1 : 0, `new bar at ${elapsed}`);
+		assert.equal(count("OG"), (elapsed >= 440 && elapsed <= 680) || (elapsed >= 1160 && elapsed <= 1400) ? 1 : 0, `grey turn at ${elapsed}`);
+		assert.equal(count("GB"), (elapsed >= 560 && elapsed <= 800) || (elapsed >= 1280 && elapsed <= 1520) ? 1 : 0, `removal at ${elapsed}`);
 		appearances += count("BO");
 		// The plate only moves on 80ms boundaries: odd 40ms frames equal the previous even frame.
 		if (elapsed % 80 === 40) assert.equal(plateOf(elapsed), plateOf(elapsed - 40), `plate at ${elapsed}`);
 	}
-	assert.equal(appearances, 7);
-	assert.equal(row(800).slice(19), row(2000).slice(19), "all ghosts are gone at 800ms");
-	assert.ok(!row(800).includes("O") && !row(800).includes("G"));
+	assert.equal(appearances, 14, "seven bars appear exactly twice");
+	for (let elapsed = 800; elapsed < 880; elapsed++) assert.equal(row(elapsed).slice(19), "B".repeat(60), `blank 80ms gap at ${elapsed}`);
+	for (let elapsed = 0; elapsed <= 640; elapsed += 40) assert.equal(row(880 + elapsed), row(160 + elapsed), `identical second ping and unchanged plate at +${elapsed}`);
+	for (let elapsed = 1520; elapsed <= 3000; elapsed += 40) assert.equal(row(elapsed).slice(19), "B".repeat(60), `no third ping at ${elapsed}`);
 });
 
 test("rendering quantizes ping to 40ms and the plate to 80ms at every millisecond", () => {
@@ -691,7 +694,7 @@ test("late timer wake-ups catch up and wall-clock jumps cannot extend the bounde
 	wall += 1000; // An event-loop stall: time passes before the first timer runs.
 	tick(40);
 	assert.equal(h.renderRequests, 1, "one redraw, not a burst of missed frames");
-	assertRow(h.renderMarker(), 1040); // Ping is long gone; the plate is filled.
+	assertRow(h.renderMarker(), 1040); // Catch up into the second ping; the plate is still filled.
 	wall += 5000;
 	tick(40); // Next boundary was 1080ms.
 	assert.equal(h.renderWidget(), undefined);

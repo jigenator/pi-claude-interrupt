@@ -22,13 +22,15 @@ type Delivery = "steer" | "followUp";
 type Queued = { text: string; deliverAs: Delivery };
 
 // Rendered rows reduced to plate, gap and the 16-cell bar span at Pi's default outputPad 1. Bars sit at
-// cells [0,1,3,5,8,11,15]; each shows from 160 + 40i until its ghost disappears at 560 + 40i. Ghost
-// colour is covered by the cell-level tests; the glyph is the same.
+// cells [0,1,3,5,8,11,15]; two pings launch at 160 and 880ms, with an 80ms blank gap.
+// Each bar stays visible 400ms, including its ghost (colour covered by the cell-level tests).
 const barCells = [0, 1, 3, 5, 8, 11, 15];
 const row = (elapsed?: number) => {
 	const frame = Math.floor((elapsed ?? 3000) / 40) * 40;
 	const span = Array.from({ length: 16 }, () => " ");
-	barCells.forEach((cell, bar) => { if (frame >= 160 + 40 * bar && frame < 560 + 40 * bar) span[cell] = "│"; });
+	for (const launch of [160, 880]) barCells.forEach((cell, bar) => {
+		if (frame >= launch + 40 * bar && frame < launch + 400 + 40 * bar) span[cell] = "│";
+	});
 	return ` DIRECTIVE UPDATED  ${span.join("")}`;
 };
 // The same rows at outputPad 0: one column left, so a blank fills the 36-column slice.
