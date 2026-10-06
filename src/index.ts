@@ -68,6 +68,7 @@ const PING_LAUNCH = 160;
 const PING_STAGGER = 40;
 const GHOST_AT = 440;
 const GHOST_FOR = 120;
+const PING_REPEAT_AFTER = 720; // Repeat once: 640ms ping + 80ms blank gap.
 
 // Filled plates use the Acid/Black palette. Everything else keeps the terminal's
 // default background, including transparency; Pi handles color-mode conversion.
@@ -109,7 +110,8 @@ export function renderMarker(theme: Theme, width: number, outputPad: 0 | 1, elap
 	add(label.slice(plate - recorded), recordPlate);
 	add(" ", blank);
 
-	const t = Math.floor(m / FRAME) * FRAME;
+	const pingTime = m >= PING_LAUNCH + PING_REPEAT_AFTER ? m - PING_REPEAT_AFTER : m;
+	const t = Math.floor(pingTime / FRAME) * FRAME;
 	for (let x = 0; x < SPAN; x++) {
 		const bar = BAR_OFFSETS.indexOf(x);
 		const ghostAt = GHOST_AT + bar * PING_STAGGER;
