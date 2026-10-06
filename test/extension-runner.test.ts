@@ -24,6 +24,8 @@ type Queued = { text: string; deliverAs: Delivery };
 // Rendered rows reduced to their label/indicator columns at Pi's default outputPad 1.
 const live = (indicator: string) => ` DIRECTIVE UPDATED  ${indicator} `;
 const settled = live("✓  ");
+// The same rows at outputPad 0: one column left, so the rule starts inside the 24-column slice.
+const unpadded = (row: string) => row.slice(1) + "─";
 const conveyor = (step: number) => ["▶··", "›▶·", "·›▶"][Math.floor(step / 2) % 3];
 const indicatorAt = (step: number) => step >= 34 ? "✓  " : conveyor(step);
 
@@ -64,6 +66,8 @@ async function createRunnerHarness(t: TestContext, savedSession?: SessionManager
 	let widget: (Component & { dispose?(): void }) | undefined;
 	let renderRequests = 0;
 	let widgetDisposals = 0;
+	let outputPad: 0 | 1 | undefined;
+	let replaced = false;
 	const session = savedSession ?? SessionManager.inMemory(root);
 	// A real Pi Theme exercises the renderer's style calls and color conversion.
 	const theme = new Theme(
@@ -140,7 +144,7 @@ async function createRunnerHarness(t: TestContext, savedSession?: SessionManager
 		setLabel: () => undefined,
 		getActiveTools: () => [],
 		getAllTools: () => [],
-		getSettings: () => ({}),
+		getSettings: () => ({ outputPad }),
 		setActiveTools: () => undefined,
 		refreshTools: () => undefined,
 		getCommands: () => [],
@@ -197,7 +201,9 @@ async function createRunnerHarness(t: TestContext, savedSession?: SessionManager
 	runner.bindCore(actions, contextActions);
 	runner.setUIContext(ui, "tui");
 	await runner.emit({ type: "session_start", reason: "startup" });
-	t.after(() => runner.emit({ type: "session_shutdown", reason: "quit" }));
+	t.after(async () => {
+		if (!replaced) await runner.emit({ type: "session_shutdown", reason: "quit" });
+	});
 
 	const flush = async (): Promise<void> => {
 		while (jobs.size > 0) await Promise.all([...jobs]);
@@ -208,7 +214,7 @@ async function createRunnerHarness(t: TestContext, savedSession?: SessionManager
 		session,
 		get renderRequests() { return renderRequests; },
 		get widgetDisposals() { return widgetDisposals; },
-		renderMarkers: () => session.getBranch().flatMap((entry) => {
+		renderMarkers: (rowWidth = outputPad === 0 ? 80 : 79) => session.getBranch().flatMap((entry) => {
 			if (entry.type !== "custom") return [];
 			let component = components.get(entry.id);
 			if (!component) {
@@ -218,9 +224,17 @@ async function createRunnerHarness(t: TestContext, savedSession?: SessionManager
 			}
 			const lines = component.render(80);
 			assert.equal(lines.length, 1);
-			assert.equal(visibleWidth(lines[0]), 79, "rule stops at the right outputPad column");
+			assert.equal(visibleWidth(lines[0]), rowWidth, "rule stops at the right outputPad column");
 			return lines.map((line) => stripAnsi(line).slice(0, 24));
 		}),
+		setOutputPad(value: 0 | 1 | undefined) { outputPad = value; },
+		/** Pi's session replacement order: shutdown handlers, then the old runner is invalidated. */
+		async replaceSession(): Promise<void> {
+			await runner.emit({ type: "session_shutdown", reason: "new" });
+			runner.invalidate();
+			replaced = true;
+		},
+		assertRuntimeStale: () => assert.throws(() => loaded.runtime.assertActive(), /ctx is stale after session replacement/),
 		renderWidget: () => widget?.render(80),
 		coreQueue,
 		started,
@@ -417,4 +431,36 @@ test("real TUI keeps owned repeats out of native focus across failed preflight a
 	assert.deepEqual(h.escape("\x1b[27;1:2u"), { consume: true });
 	assert.deepEqual(h.renderWidget(), []);
 	assert.deepEqual(h.focusedInput, [], "owned repeat cannot reach native interrupt handling");
+});
+
+test("real ExtensionRunner keeps retained marker components renderable after session replacement", async (t) => {
+	const h = await createRunnerHarness(t);
+	t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+	await h.queue("continue here", "steer");
+	h.escape();
+	await h.settle();
+	assert.deepEqual(h.renderMarkers(), [live("▶··")]);
+
+	// Pi does not rebuild entry components when outputPad changes mid-stream.
+	h.setOutputPad(0);
+	assert.deepEqual(h.renderMarkers(), [unpadded(live("▶··"))]);
+
+	await h.replaceSession();
+	h.assertRuntimeStale();
+	assert.equal(h.widgetDisposals, 1, "shutdown disposes the zero-row widget");
+	// Components of the old session stay in Pi's transcript until the new session
+	// rebinds it; their renderer must not call the invalidated runtime.
+	assert.deepEqual(h.renderMarkers(), [unpadded(settled)], "finalized, keeping the last live outputPad");
+	h.setOutputPad(1); // Settings are no longer read once the runtime is retired.
+	assert.deepEqual(h.renderMarkers(80), [unpadded(settled)]);
+
+	const renders = h.renderRequests;
+	t.mock.timers.runAll();
+	assert.equal(h.renderRequests, renders, "no animation timer outlives the replaced session");
+
+	// The replacement runtime renders the saved entry with its own settings.
+	const next = await createRunnerHarness(t, h.session);
+	assert.deepEqual(next.renderMarkers(), [settled]);
+	next.setOutputPad(0);
+	assert.deepEqual(next.renderMarkers(), [unpadded(settled)]);
 });

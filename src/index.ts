@@ -142,12 +142,18 @@ export function createClaudeInterrupt(pi: ExtensionAPI): void {
 		requestRender?: () => void;
 	} | undefined;
 
+	// Pi invalidates `pi` when the session is replaced, but this runtime's entry
+	// components keep rendering until the new session rebinds the transcript.
+	// Entry renderers receive no context, so the pad is read live until shutdown
+	// and then kept as plain data.
+	let retiredOutputPad: 0 | 1 | undefined;
+	const currentOutputPad = (): 0 | 1 => retiredOutputPad ?? (pi.getSettings().outputPad === 0 ? 0 : 1);
+
 	// Only this runtime's live identity animates. Saved entries always render done.
 	pi.registerEntryRenderer<{ id: string }>(markerType, (entry, _options, theme) => ({
 		render: (width) => {
 			const live = animation && entry.data?.id === animation.id ? animation : undefined;
-			const pad = pi.getSettings().outputPad === 0 ? 0 : 1;
-			return [renderMarker(theme, width, pad, live?.elapsed)];
+			return [renderMarker(theme, width, currentOutputPad(), live?.elapsed)];
 		},
 		invalidate() {},
 	}));
@@ -381,6 +387,7 @@ export function createClaudeInterrupt(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", () => {
+		retiredOutputPad = currentOutputPad();
 		reset();
 	});
 }
