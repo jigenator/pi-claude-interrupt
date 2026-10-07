@@ -1,5 +1,7 @@
 # pi-claude-interrupt
 
+> **Moved.** This extension now lives in [jigenator/industrial-os](https://github.com/jigenator/industrial-os/tree/main/pi/claude-interrupt) at `pi/claude-interrupt/`, with its full history. This repository is archived and no longer updated.
+
 A minimal [Pi](https://github.com/earendil-works/pi) extension that gives ordinary queued **text** a Claude-style interrupt flow.
 
 While Pi is working:
